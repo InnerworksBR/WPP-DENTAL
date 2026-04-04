@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+credentials/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.idea/
+.claude/
+*.db
+*.db-wal
+*.db-shm
+*.log
+debug_creds.py

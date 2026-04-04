@@ -1,0 +1,130 @@
+# WPP-DENTAL
+
+Assistente de agendamento odontologico via WhatsApp, integrado ao Google Calendar e organizado em camadas de arquitetura limpa.
+
+## Objetivo
+
+Atender o fluxo descrito em [`PRD.md`](./PRD.md) com um backend previsivel, testavel e pronto para operacao em VPS.
+
+## Stack
+
+- Python 3.11+
+- FastAPI
+- SQLite
+- Google Calendar API
+- Evolution API
+- YAML para configuracao
+
+## Estrutura
+
+```text
+wpp-dental/
+|-- config/
+|-- deploy/
+|-- src/
+|   |-- application/
+|   |-- domain/
+|   |-- infrastructure/
+|   `-- interfaces/
+|-- tests/
+|-- .env.example
+|-- pyproject.toml
+|-- requirements.txt
+`-- README.md
+```
+
+## Camadas
+
+- `domain`: regras centrais, entidades e politicas de negocio.
+- `application`: fluxo de conversa, servicos de caso de uso e orquestracao.
+- `infrastructure`: banco, configuracao e integracoes externas.
+- `interfaces`: HTTP e tools adaptadas para o mundo externo.
+
+## Desenvolvimento local
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e .
+uvicorn src.main:app --host 0.0.0.0 --port 3000 --reload
+```
+
+## Testes
+
+```bash
+.\.venv\Scripts\python -m pytest -q
+```
+
+## Deploy na VPS
+
+### 1. Preparar a aplicacao
+
+```bash
+git clone <repo-url> /opt/wpp-dental
+cd /opt/wpp-dental
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+chmod +x deploy/start.sh
+```
+
+### 2. Configurar ambiente
+
+Preencha o arquivo `.env` com:
+
+- `OPENAI_API_KEY`
+- `EVOLUTION_API_URL`
+- `EVOLUTION_API_KEY`
+- `EVOLUTION_INSTANCE`
+- `WEBHOOK_API_KEY`
+- `GOOGLE_CALENDAR_ID`
+- `DOCTOR_PHONE`
+- `DATABASE_PATH`
+
+Google Calendar pode ser configurado de duas formas:
+
+1. Arquivo JSON em `./credentials/service-account.json`
+2. Variaveis `GOOGLE_SERVICE_ACCOUNT_EMAIL` e `GOOGLE_PRIVATE_KEY`
+
+### 3. Subir manualmente
+
+```bash
+./deploy/start.sh
+```
+
+### 4. Subir com systemd
+
+```bash
+sudo cp deploy/wpp-dental.service /etc/systemd/system/wpp-dental.service
+sudo systemctl daemon-reload
+sudo systemctl enable wpp-dental
+sudo systemctl start wpp-dental
+sudo systemctl status wpp-dental
+```
+
+Antes de usar o arquivo de service, ajuste:
+
+- `User`
+- `WorkingDirectory`
+- `EnvironmentFile`
+
+## Validacao conversacional
+
+O projeto possui uma bateria com 10 conversas humanas simuladas, com variacoes de escrita, erros de digitacao e manutencao de contexto:
+
+```bash
+.\.venv\Scripts\python -m pytest -q tests/test_conversation_context_validation.py
+```
+
+## Ponto de entrada
+
+- API principal: `src.main:app`
+- Health check: `/health`
+- Webhook principal: `/webhook/message`
+
+## Observacoes
+
+- A configuracao operacional fica em `config/*.yaml`.
+- O banco SQLite e inicializado automaticamente no startup.
+- A fachada `src.main` foi mantida para preservar compatibilidade com deploy e testes.

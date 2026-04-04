@@ -1,0 +1,15 @@
+[Unit]
+Description=WPP-DENTAL FastAPI service
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/wpp-dental
+EnvironmentFile=/opt/wpp-dental/.env
+ExecStart=/opt/wpp-dental/.venv/bin/uvicorn src.main:app --host 0.0.0.0 --port 3000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

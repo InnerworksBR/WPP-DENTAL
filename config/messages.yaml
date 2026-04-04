@@ -1,0 +1,111 @@
+# Templates de mensagens do assistente
+# Use {variavel} para interpolacao
+
+greeting:
+  new_patient: |
+    Ola! 😊 Eu sou a assistente virtual da {doctor_name}.
+    Posso te ajudar com agendamento, remarcacao, cancelamento e consulta de horario.
+    Para comecar, pode me informar seu nome completo?
+  returning_patient: |
+    Ola, {patient_name}! 😊 Que bom falar com voce novamente.
+    Como posso te ajudar com sua consulta hoje?
+
+ask_plan:
+  prompt: |
+    Perfeito, {patient_name}. 🦷
+    Qual e o seu convenio/plano odontologico?
+
+scheduling:
+  ask_period: |
+    Qual periodo voce prefere para a consulta? 🕒
+
+    - Manha: 07:00 as 12:00
+    - Tarde: 12:00 as 18:00
+    - Noite: 18:00 as 21:00
+
+    Se preferir, voce tambem pode me informar uma data no formato DD/MM/AAAA.
+  suggest_slots: |
+    Encontrei estes horarios disponiveis 📅
+
+    1. {slot_1}
+    2. {slot_2}
+
+    Qual voce prefere?
+  suggest_slots_list: |
+    Encontrei estes horarios disponiveis para {date} 📅
+
+    {slots_list}
+
+    Qual horario fica melhor para voce?
+  confirmed: |
+    Consulta agendada com sucesso. ✅
+
+    Data: {date}
+    Horario: {time}
+    Dentista: {doctor_name}
+
+    Se precisar remarcar ou cancelar depois, e so me chamar. 😊
+  no_slots: |
+    Nao encontrei horarios livres nesse periodo. 😕
+    Se quiser, posso tentar outro periodo ou outra data.
+
+cancel:
+  confirm: |
+    Encontrei sua consulta 📌
+
+    Data: {date}
+    Horario: {time}
+
+    Deseja realmente cancelar?
+  cancelled: |
+    Consulta cancelada com sucesso. ✅
+
+    Era para: {date} as {time}
+
+    Se quiser, posso te ajudar a agendar um novo horario.
+  not_found: |
+    Nao encontrei nenhuma consulta futura vinculada ao seu nome. 🤔
+    Se quiser, posso te ajudar a agendar uma nova.
+
+query:
+  found: |
+    Sua proxima consulta esta marcada para 📋
+
+    Data: {date}
+    Horario: {time}
+    Dentista: {doctor_name}
+
+    Se quiser, tambem posso te ajudar a remarcar ou cancelar.
+  not_found: |
+    Nao encontrei consultas futuras vinculadas ao seu nome. 🤔
+    Se quiser, posso te ajudar a agendar uma nova.
+
+escalation:
+  to_patient: |
+    Entendi. Vou encaminhar sua mensagem para a {doctor_name}, e ela deve falar com voce em breve. 💬
+  referral: |
+    Esse convenio e atendido por uma profissional parceira.
+    A {doctor_name} vai te orientar sobre o encaminhamento. 🤝
+
+alerts:
+  to_doctor: |
+    Alerta do assistente virtual
+
+    Paciente: {patient_name}
+    Telefone: {patient_phone}
+    Solicitacao: {summary}
+    Motivo: {reason}
+
+    Ultima mensagem:
+    "{last_message}"
+
+errors:
+  plan_not_found: |
+    Nao consegui localizar esse convenio no sistema. 🤔
+    Pode conferir o nome, por favor?
+
+    Convenios que atendemos:
+    {available_plans}
+  general: |
+    Tive um problema tecnico agora. ⚠️
+    A {doctor_name} sera avisada e deve falar com voce em breve.

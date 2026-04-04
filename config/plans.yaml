@@ -1,0 +1,47 @@
+plans:
+  - name: "Amil Dental"
+    active: true
+    referral: false
+    restrictions:
+      - "clareamento"
+      - "implante"
+
+  - name: "Bradesco Dental"
+    active: true
+    referral: false
+    restrictions: []
+
+  - name: "SulAmérica Odonto"
+    active: true
+    referral: false
+    restrictions:
+      - "implante"
+
+  - name: "Uniodonto"
+    active: true
+    referral: false
+    restrictions: []
+
+  - name: "OdontoPrev"
+    active: true
+    referral: false
+    restrictions: []
+
+  - name: "MetLife Dental"
+    active: true
+    referral: false
+    restrictions: []
+
+  - name: "Particular"
+    active: true
+    referral: false
+    restrictions: []
+
+  # Exemplo de plano com encaminhamento:
+  # - name: "Particular Convênio X"
+  #   active: true
+  #   referral: true
+  #   referral_message: "Este convênio é atendido pela Dra. [Nome]. A doutora entrará em contato para encaminhar."
+  #   restrictions: []
+
+  # Para adicionar um novo plano, basta copiar o bloco acima e preencher.
