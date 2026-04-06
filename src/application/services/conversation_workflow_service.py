@@ -89,6 +89,68 @@ class ConversationWorkflowService:
         "planos",
         "odonto",
     )
+    _PROCEDURE_QUESTION_HINTS = (
+        "faz",
+        "fazem",
+        "realiza",
+        "realizam",
+        "atende",
+        "atendem",
+        "aceita",
+        "aceitam",
+        "cobre",
+        "cobertura",
+        "trabalha com",
+        "trabalham com",
+        "como funciona",
+        "tem",
+        "consegue",
+    )
+    _SHORT_FOLLOW_UP_PREFIXES = (
+        "e ",
+        "e a ",
+        "e o ",
+        "e pela ",
+        "e pelo ",
+        "e por ",
+    )
+    _SOCIAL_ONLY_MESSAGES = {
+        "ok",
+        "okay",
+        "obrigado",
+        "obrigada",
+        "obg",
+        "valeu",
+        "perfeito",
+        "beleza",
+        "blz",
+        "entendi",
+        "certo",
+        "combinado",
+        "show",
+        "ta bom",
+        "tudo bem",
+    }
+    _SOCIAL_ONLY_TOKENS = {
+        "ok",
+        "okay",
+        "obrigado",
+        "obrigada",
+        "obg",
+        "valeu",
+        "perfeito",
+        "beleza",
+        "blz",
+        "entendi",
+        "certo",
+        "combinado",
+        "show",
+        "ta",
+        "bom",
+        "tudo",
+        "bem",
+    }
+    _THANK_TOKENS = ("obrigado", "obrigada", "obg", "valeu")
     _PERIOD_ALIASES = {
         "manha": "manha",
         "manhã": "manha",
@@ -607,6 +669,53 @@ class ConversationWorkflowService:
             "Se preferir, posso pedir para a doutora te encaminhar essa informacao."
         )
 
+    def _looks_like_brief_follow_up(self, text: str) -> bool:
+        normalized = self._normalize(text)
+        if not normalized:
+            return False
+
+        if any(normalized.startswith(prefix) for prefix in self._SHORT_FOLLOW_UP_PREFIXES):
+            return True
+
+        return text.strip().endswith("?") and len(normalized.split()) <= 6
+
+    def _last_assistant_message_from_history(self, history_text: str | None) -> str:
+        if not history_text:
+            return ""
+
+        for line in reversed(history_text.splitlines()):
+            stripped = line.strip()
+            if stripped.startswith("ASSISTENTE:"):
+                return stripped[len("ASSISTENTE:"):].strip()
+        return ""
+
+    def _is_social_only_message(self, text: str) -> bool:
+        normalized = self._normalize(text)
+        if not normalized:
+            return False
+
+        if normalized in self._SOCIAL_ONLY_MESSAGES:
+            return True
+
+        tokens = normalized.split()
+        return bool(tokens) and all(token in self._SOCIAL_ONLY_TOKENS for token in tokens)
+
+    def _handle_social_message(self, patient_message: str, history_text: str | None) -> str | None:
+        if not self._is_social_only_message(patient_message):
+            return None
+
+        if not self._last_assistant_message_from_history(history_text):
+            return None
+
+        normalized = self._normalize(patient_message)
+        if any(self._contains_keyword(normalized, token) for token in self._THANK_TOKENS):
+            return (
+                "Por nada! Se precisar de ajuda com sua consulta ou outra duvida operacional, "
+                "estou por aqui."
+            )
+
+        return "Perfeito. Se precisar de mais alguma coisa, estou por aqui."
+
     def _is_plan_list_question(self, text: str) -> bool:
         normalized = self._normalize(text)
         return any(self._contains_keyword(normalized, keyword) for keyword in self._PLAN_LIST_HINTS)
@@ -617,6 +726,9 @@ class ConversationWorkflowService:
             return False
 
         if self._is_plan_list_question(patient_message):
+            return True
+
+        if explicit_plan and self._looks_like_brief_follow_up(patient_message):
             return True
 
         has_question_hint = any(
@@ -701,6 +813,143 @@ class ConversationWorkflowService:
             f"Sim, atendemos {canonical_plan}. "
             "Se quiser, tambem posso te ajudar a agendar ou tirar outra duvida sobre o atendimento."
         )
+
+    def _should_answer_procedure_question(
+        self,
+        patient_message: str,
+        detected_procedure: dict[str, Any] | None,
+        detected_intent: str,
+        explicit_plan: str,
+    ) -> bool:
+        if detected_procedure is None:
+            return False
+
+        normalized = self._normalize(patient_message)
+        if not normalized:
+            return False
+
+        has_question_hint = any(
+            self._contains_keyword(normalized, keyword) for keyword in self._PROCEDURE_QUESTION_HINTS
+        )
+        has_plan_context = bool(explicit_plan) or any(
+            self._contains_keyword(normalized, keyword)
+            for keyword in ("convenio", "plano", "pelo", "pela", "particular")
+        )
+        is_follow_up = self._looks_like_brief_follow_up(patient_message)
+
+        if detected_intent in {"cancel", "query", "reschedule"}:
+            return False
+
+        if detected_intent == "schedule" and not has_question_hint and not is_follow_up:
+            return False
+
+        return has_question_hint or has_plan_context or is_follow_up
+
+    def _handle_procedure_question(
+        self,
+        patient_message: str,
+        explicit_plan: str,
+        detected_procedure: dict[str, Any],
+    ) -> str:
+        del patient_message
+        label = str(detected_procedure.get("label", "esse procedimento")).strip()
+        allowed_plans = [
+            str(plan).strip()
+            for plan in detected_procedure.get("allowed_plans", [])
+            if str(plan).strip()
+        ]
+        allowed_plans_label = self._format_allowed_plans(allowed_plans)
+
+        if detected_procedure.get("not_performed", False):
+            return self.config.get_message(
+                "procedure_rules.not_performed",
+                procedure_label=label,
+            ).strip()
+
+        if explicit_plan:
+            canonical_plan = self._canonical_plan_name(explicit_plan)
+            if allowed_plans and not self._plan_is_allowed(canonical_plan, allowed_plans):
+                if self._plan_is_allowed("Particular", allowed_plans):
+                    return self.config.get_message(
+                        "procedure_rules.only_particular",
+                        procedure_label=label,
+                        procedure_label_capitalized=self._capitalize_label(label),
+                    ).strip()
+
+                return self.config.get_message(
+                    "procedure_rules.only_allowed_plans",
+                    procedure_label=label,
+                    allowed_plans=allowed_plans_label,
+                ).strip()
+
+            if detected_procedure.get("requires_card_photo", False):
+                return self.config.get_message(
+                    "procedure_rules.card_photo_required",
+                    procedure_label=label,
+                    plan_name=canonical_plan,
+                ).strip()
+
+            return (
+                f"Sim, atendemos {label} pelo convenio {canonical_plan}. "
+                "Se quiser, posso continuar seu atendimento por aqui."
+            )
+
+        if allowed_plans and self._plan_is_allowed("Particular", allowed_plans) and len(allowed_plans) == 1:
+            return self.config.get_message(
+                "procedure_rules.only_particular",
+                procedure_label=label,
+                procedure_label_capitalized=self._capitalize_label(label),
+            ).strip()
+
+        if detected_procedure.get("requires_card_photo", False):
+            return self.config.get_message(
+                "procedure_rules.allowed_plans_with_card_photo",
+                procedure_label=label,
+                allowed_plans=allowed_plans_label,
+            ).strip()
+
+        if allowed_plans:
+            return self.config.get_message(
+                "procedure_rules.only_allowed_plans",
+                procedure_label=label,
+                allowed_plans=allowed_plans_label,
+            ).strip()
+
+        return f"Posso te orientar sobre {label} dentro do escopo de agendamento. Se quiser, me diga seu plano."
+
+    def _handle_contextual_message(
+        self,
+        *,
+        patient_message: str,
+        history_text: str | None,
+        state: ConversationState,
+        detected_intent: str,
+        explicit_plan: str,
+        detected_procedure: dict[str, Any] | None,
+    ) -> str | None:
+        if state.stage not in {"idle", "awaiting_intent"}:
+            return None
+
+        social_response = self._handle_social_message(patient_message, history_text)
+        if social_response:
+            return social_response
+
+        if self._should_answer_procedure_question(
+            patient_message,
+            detected_procedure,
+            detected_intent,
+            explicit_plan,
+        ):
+            return self._handle_procedure_question(
+                patient_message,
+                explicit_plan,
+                detected_procedure or {},
+            )
+
+        if self._should_answer_plan_question(patient_message, explicit_plan):
+            return self._handle_plan_question(patient_message, explicit_plan)
+
+        return None
 
     def _handle_cancel_confirmation(
         self,
@@ -968,7 +1217,6 @@ class ConversationWorkflowService:
     ) -> str:
         """Processa a mensagem do paciente usando regras de negocio e estado persistido."""
 
-        del history_text
         if is_first_message is None:
             is_first_message = False
 
@@ -990,9 +1238,6 @@ class ConversationWorkflowService:
             state.plan_name = state.plan_name or known_patient["plan"]
 
         explicit_plan = self._extract_plan_name(patient_message)
-        if detected_procedure is not None:
-            state.requested_procedure = str(detected_procedure.get("key", "")).strip()
-            state.requested_reason = state.requested_reason or str(detected_procedure.get("label", "")).strip()
 
         if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
             return self._handle_pending_appointment_confirmation(
@@ -1007,8 +1252,16 @@ class ConversationWorkflowService:
         if state.stage == "awaiting_referral_reason":
             return self._handle_referral_reason(patient_phone, state, patient_message)
 
-        if self._should_answer_plan_question(patient_message, explicit_plan):
-            return self._handle_plan_question(patient_message, explicit_plan)
+        contextual_response = self._handle_contextual_message(
+            patient_message=patient_message,
+            history_text=history_text,
+            state=state,
+            detected_intent=detected_intent,
+            explicit_plan=explicit_plan,
+            detected_procedure=detected_procedure,
+        )
+        if contextual_response:
+            return contextual_response
 
         if not state.patient_name:
             extracted_name = self._extract_name(patient_message, patient_name)
@@ -1025,7 +1278,11 @@ class ConversationWorkflowService:
         if explicit_plan:
             state.plan_name = explicit_plan
 
-        intent = detected_intent or ("schedule" if state.requested_procedure else "") or state.intent
+        if detected_procedure is not None:
+            state.requested_procedure = str(detected_procedure.get("key", "")).strip()
+            state.requested_reason = state.requested_reason or str(detected_procedure.get("label", "")).strip()
+
+        intent = detected_intent or ("schedule" if (detected_procedure is not None or state.requested_procedure) else "") or state.intent
         if not intent:
             state.stage = "awaiting_intent"
             ConversationStateService.save(patient_phone, state)

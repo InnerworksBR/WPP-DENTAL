@@ -121,6 +121,9 @@ procedure_rules:
     Pode me enviar por aqui?
 
     A doutora vai conferir e te orientar nos proximos passos.
+  allowed_plans_with_card_photo: |
+    Para {procedure_label}, atendemos por convenio apenas pelos planos {allowed_plans}.
+    Nesses casos, preciso de uma foto da carteirinha para conferencia.
   only_allowed_plans: |
     Para {procedure_label}, atendemos por convenio apenas pelos planos {allowed_plans}.
     Se precisar de mais alguma coisa, estou por aqui.

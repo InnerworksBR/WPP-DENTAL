@@ -535,3 +535,85 @@ class TestConversationWorkflowService:
         assert "dra. tarcilia" in normalized
         assert "motivo da consulta" not in normalized
         assert state.stage == "idle"
+
+    def test_brief_plan_follow_up_is_answered_contextually(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+
+        init_db()
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511555555555",
+            patient_message="E a Unimed?",
+            patient_name="",
+            history_text="ASSISTENTE: Hoje atendemos pelos convenios OdontoPrev, Unimed Odonto e Amil Dental.",
+            is_first_message=False,
+        )
+
+        normalized = response.lower()
+        assert "sim, atendemos unimed odonto" in normalized
+        assert "o que voce gostaria de fazer" not in normalized
+
+    def test_procedure_question_is_answered_directly_without_entering_schedule_flow(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_state_service import ConversationStateService
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+
+        init_db()
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511444444444",
+            patient_message="Voces fazem ortodontia?",
+            patient_name="",
+            is_first_message=True,
+        )
+        state = ConversationStateService.get("5511444444444")
+
+        normalized = response.lower()
+        assert "odontoprev" in normalized
+        assert "sulamerica" in normalized
+        assert "foto da carteirinha" in normalized
+        assert "nome completo" not in normalized
+        assert "qual periodo" not in normalized
+        assert state.stage == "idle"
+
+    def test_procedure_question_with_plan_answers_contextually(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+
+        init_db()
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511333333333",
+            patient_message="Ortodontia pela Sulamerica?",
+            patient_name="",
+            is_first_message=True,
+        )
+
+        normalized = response.lower()
+        assert "foto da carteirinha" in normalized
+        assert "sulamerica" in normalized
+        assert "nome completo" not in normalized
+        assert "qual periodo" not in normalized
+
+    def test_social_acknowledgement_does_not_reopen_flow(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+
+        init_db()
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511222222222",
+            patient_message="Obrigado",
+            patient_name="Cristian",
+            history_text="ASSISTENTE: O endereco da clinica e Benjamin Constant, 61 - sala 1114, Centro, Sao Vicente/SP.",
+            is_first_message=False,
+        )
+
+        normalized = response.lower()
+        assert "por nada" in normalized
+        assert "agendar, remarcar, cancelar" not in normalized
