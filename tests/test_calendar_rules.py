@@ -1,6 +1,7 @@
 """Testes das regras de agenda e sugestao de horarios."""
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -104,3 +105,66 @@ class TestCalendarRules:
         assert appointments[0]["event_id"] == "evt-1"
         assert appointments[0]["patient_name"] == "Maria Silva"
         assert appointments[0]["patient_phone"] == "11999999999"
+
+    def test_get_service_uses_container_credentials_path_when_relative_file_is_missing(
+        self, monkeypatch
+    ):
+        service = CalendarService()
+        captured = {}
+
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_FILE", "./credentials/service-account.json")
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_EMAIL", raising=False)
+        monkeypatch.delenv("GOOGLE_PRIVATE_KEY", raising=False)
+
+        def fake_exists(path):
+            return path == "/app/credentials/service-account.json"
+
+        def fake_from_service_account_file(path, scopes):
+            captured["path"] = path
+            captured["scopes"] = scopes
+            return object()
+
+        def fake_build(api_name, version, credentials):
+            captured["api_name"] = api_name
+            captured["version"] = version
+            captured["credentials"] = credentials
+            return SimpleNamespace()
+
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.os.path.exists",
+            fake_exists,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.Credentials.from_service_account_file",
+            fake_from_service_account_file,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.build",
+            fake_build,
+        )
+
+        result = service._get_service()
+
+        assert isinstance(result, SimpleNamespace)
+        assert captured["path"] == "/app/credentials/service-account.json"
+        assert captured["api_name"] == "calendar"
+        assert captured["version"] == "v3"
+
+    def test_get_service_error_lists_checked_paths_when_credentials_are_missing(self, monkeypatch):
+        service = CalendarService()
+
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_FILE", "./credentials/service-account.json")
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_EMAIL", raising=False)
+        monkeypatch.delenv("GOOGLE_PRIVATE_KEY", raising=False)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.os.path.exists",
+            lambda path: False,
+        )
+
+        with pytest.raises(FileNotFoundError) as exc_info:
+            service._get_service()
+
+        message = str(exc_info.value)
+        assert "GOOGLE_SERVICE_ACCOUNT_FILE atual: ./credentials/service-account.json" in message
+        assert "/app/credentials/service-account.json" in message
+        assert "GOOGLE_SERVICE_ACCOUNT_EMAIL e GOOGLE_PRIVATE_KEY" in message

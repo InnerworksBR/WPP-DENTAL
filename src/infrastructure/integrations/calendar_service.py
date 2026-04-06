@@ -21,18 +21,46 @@ class CalendarService:
     """Gerencia operacoes de leitura e escrita no Google Calendar."""
 
     SCOPES = ["https://www.googleapis.com/auth/calendar"]
+    DEFAULT_CREDENTIALS_PATH = "./credentials/service-account.json"
+    CONTAINER_CREDENTIALS_PATH = "/app/credentials/service-account.json"
 
     def __init__(self) -> None:
         self.config = ConfigService()
         self.calendar_id = self.config.get_calendar_id()
         self._service = None
 
+    @classmethod
+    def _build_credentials_candidates(cls) -> tuple[str, list[str]]:
+        """Monta os caminhos candidatos para as credenciais do Google."""
+        configured_path = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+        candidates = []
+
+        if configured_path:
+            candidates.append(configured_path)
+
+        for fallback_path in (cls.CONTAINER_CREDENTIALS_PATH, cls.DEFAULT_CREDENTIALS_PATH):
+            if fallback_path not in candidates:
+                candidates.append(fallback_path)
+
+        reported_path = configured_path or cls.DEFAULT_CREDENTIALS_PATH
+        return reported_path, candidates
+
+    @classmethod
+    def _resolve_credentials_file(cls) -> str | None:
+        """Resolve o primeiro arquivo de credenciais existente no ambiente."""
+        _, candidates = cls._build_credentials_candidates()
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
     def _get_service(self):
         """Inicializa o servico do Google Calendar sob demanda."""
         if self._service is None:
-            creds_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "./credentials/service-account.json")
+            reported_path, candidates = self._build_credentials_candidates()
+            creds_file = self._resolve_credentials_file()
 
-            if os.path.exists(creds_file):
+            if creds_file:
                 credentials = Credentials.from_service_account_file(creds_file, scopes=self.SCOPES)
             else:
                 client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
@@ -47,7 +75,14 @@ class CalendarService:
                     }
                     credentials = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
                 else:
-                    raise FileNotFoundError(f"Credenciais do Google nao encontradas: {creds_file}")
+                    checked_paths = ", ".join(candidates)
+                    raise FileNotFoundError(
+                        "Credenciais do Google nao encontradas. "
+                        f"GOOGLE_SERVICE_ACCOUNT_FILE atual: {reported_path}. "
+                        f"Caminhos verificados: {checked_paths}. "
+                        "Monte o arquivo no container ou configure "
+                        "GOOGLE_SERVICE_ACCOUNT_EMAIL e GOOGLE_PRIVATE_KEY."
+                    )
 
             self._service = build("calendar", "v3", credentials=credentials)
         return self._service
