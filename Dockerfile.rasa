@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    RASA_PORT=5005 \
+    RASA_MODELS_DIR=/app/rasa_assistant/models
+
+WORKDIR /app
+
+COPY requirements.txt ./requirements.txt
+COPY rasa_assistant/requirements.txt ./rasa_requirements.txt
+
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -r rasa_requirements.txt
+
+COPY . .
+
+RUN chmod +x deploy/start-rasa.sh \
+    && mkdir -p data credentials rasa_assistant/models
+
+EXPOSE 5005
+
+CMD ["./deploy/start-rasa.sh"]

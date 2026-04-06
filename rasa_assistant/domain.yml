@@ -1,0 +1,130 @@
+version: "3.1"
+
+session_config:
+  session_expiration_time: 60
+  carry_over_slots_to_new_session: true
+
+slots:
+  doctor_name:
+    type: text
+    mappings:
+      - type: controlled
+  clinic_address:
+    type: text
+    mappings:
+      - type: controlled
+  accepted_plans_text:
+    type: text
+    mappings:
+      - type: controlled
+  referral_plans_text:
+    type: text
+    mappings:
+      - type: controlled
+  default_referral_target:
+    type: text
+    mappings:
+      - type: controlled
+  patient_phone:
+    type: text
+    mappings:
+      - type: controlled
+  patient_name:
+    type: text
+    mappings:
+      - type: controlled
+  plan_found:
+    type: bool
+    mappings:
+      - type: controlled
+  plan_name:
+    type: text
+    mappings:
+      - type: controlled
+  plan_is_referral:
+    type: bool
+    mappings:
+      - type: controlled
+  referral_target:
+    type: text
+    mappings:
+      - type: controlled
+  consultation_reason:
+    type: text
+    mappings:
+      - type: controlled
+  procedure_found:
+    type: bool
+    mappings:
+      - type: controlled
+  procedure_key:
+    type: text
+    mappings:
+      - type: controlled
+  procedure_label:
+    type: text
+    mappings:
+      - type: controlled
+  procedure_status:
+    type: text
+    mappings:
+      - type: controlled
+  procedure_allowed_plans_text:
+    type: text
+    mappings:
+      - type: controlled
+  procedure_requires_card_photo:
+    type: bool
+    mappings:
+      - type: controlled
+  matched_plan_name:
+    type: text
+    mappings:
+      - type: controlled
+
+responses:
+  utter_general_help:
+    - text: "Oi! Eu sou a assistente virtual da {doctor_name}. Posso te ajudar com endereco, convenios, encaminhamento, agendamento, remarcacao, cancelamento e consulta da sua proxima consulta."
+  utter_clinic_address:
+    - text: "A clinica fica em {clinic_address}"
+  utter_list_accepted_plans:
+    - text: "Atendemos diretamente pelos convenios {accepted_plans_text}. Os convenios {referral_plans_text} sao encaminhados para {default_referral_target}."
+  utter_plan_supported:
+    - text: "Sim, atendemos o convenio {plan_name}."
+  utter_plan_referral_info:
+    - text: "Esse convenio e atendido pela {referral_target}. Se quiser seguir por ele, eu consigo encaminhar seu nome, telefone e motivo da consulta para a equipe dela."
+  utter_procedure_not_performed:
+    - text: "No momento nao realizamos {procedure_label}."
+  utter_procedure_only_particular:
+    - text: "{procedure_label} e atendida apenas no particular."
+  utter_procedure_card_photo_required:
+    - text: "Para {procedure_label} pelo convenio {matched_plan_name}, preciso de uma foto da carteirinha para conferencia."
+  utter_procedure_allowed_plans_with_card_photo:
+    - text: "Para {procedure_label}, atendemos por convenio apenas pelos planos {procedure_allowed_plans_text}. Nesses casos, preciso da foto da carteirinha para conferencia."
+  utter_procedure_not_allowed_for_plan:
+    - text: "Para {procedure_label}, atendemos por convenio apenas pelos planos {procedure_allowed_plans_text}."
+  utter_procedure_allowed_plans_only:
+    - text: "Para {procedure_label}, os convenios aceitos sao {procedure_allowed_plans_text}."
+  utter_polite_close:
+    - text: "Por nada. Se precisar de mais alguma coisa, e so me chamar."
+  utter_ask_patient_name:
+    - text: "Perfeito. Qual e o seu nome completo?"
+      metadata:
+        rephrase: false
+  utter_ask_consultation_reason:
+    - text: "Me diga, por favor, o motivo da consulta para eu encaminhar certinho."
+      metadata:
+        rephrase: false
+  utter_referral_sent:
+    - text: "Perfeito. Vou encaminhar seu nome, telefone e motivo da consulta para a equipe da {referral_target}."
+  utter_internal_error_rasa:
+    - text: "Tive um problema tecnico agora. Se quiser, me envie a mensagem novamente em instantes."
+      metadata:
+        rephrase: false
+
+actions:
+  - action_load_clinic_context
+  - action_check_plan_info
+  - action_check_procedure_policy
+  - action_send_tarcilia_referral
+  - action_handle_legacy_turn

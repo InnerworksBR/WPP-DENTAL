@@ -1,0 +1,28 @@
+tracker_store:
+  type: SQL
+  dialect: sqlite
+  db: /app/data/rasa-tracker.db
+
+actions_module: rasa_assistant.actions.actions
+
+nlg:
+  type: rephrase
+  rephrase_all: true
+  summarize_history: false
+  max_historical_turns: 6
+  prompt: rasa_assistant/prompts/response-rephraser-template.jinja2
+  llm:
+    model_group: openai_command_generator
+
+model_groups:
+  - id: openai_command_generator
+    models:
+      - provider: openai
+        model: ${RASA_OPENAI_MODEL}
+        api_key: ${OPENAI_API_KEY}
+        temperature: 0.2
+  - id: openai_embeddings
+    models:
+      - provider: openai
+        model: text-embedding-3-large
+        api_key: ${OPENAI_API_KEY}
