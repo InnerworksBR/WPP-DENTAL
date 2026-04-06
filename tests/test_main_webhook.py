@@ -43,6 +43,15 @@ class TestMainWebhook:
         close_db()
         self.db_path.unlink(missing_ok=True)
 
+    def test_root_healthcheck_returns_ok(self):
+        import src.main as main
+
+        with TestClient(main.app) as client:
+            response = client.get("/")
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "service": "wpp-dental"}
+
     def test_message_webhook_accepts_request_without_valid_auth_header(self, monkeypatch):
         import src.main as main
 

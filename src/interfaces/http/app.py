@@ -108,6 +108,12 @@ app = FastAPI(
 dental_crew = DentalCrew()
 
 
+@app.get("/")
+async def root_check():
+    """Endpoint raiz para health checks mais simples de plataforma."""
+    return {"status": "ok", "service": "wpp-dental"}
+
+
 @app.get("/health")
 async def health_check():
     """Endpoint de health check."""
