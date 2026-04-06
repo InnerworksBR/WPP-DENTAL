@@ -3,7 +3,7 @@ doctor:
   name: "Dra. Priscila"
   phone: "${DOCTOR_PHONE}"
   calendar_id: "${GOOGLE_CALENDAR_ID}"
-  address: "Av. Exemplo, 123 - Centro, São Vicente - SP"
+  address: "Benjamin Constant, 61 - sala 1114, Centro, São Vicente/SP."
 
 # Períodos do dia para sugestão de horários
 periods:
