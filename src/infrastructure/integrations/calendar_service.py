@@ -1,6 +1,7 @@
 """Servico de integracao com o Google Calendar."""
 
 import base64
+import binascii
 import json
 import os
 import threading
@@ -57,17 +58,61 @@ class CalendarService:
         return None
 
     @staticmethod
-    def _load_credentials_from_json_env() -> dict[str, Any] | None:
+    def _strip_wrapping_quotes(value: str) -> str:
+        """Remove aspas externas quando o painel salva o valor como string literal."""
+        cleaned = (value or "").strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+            return cleaned[1:-1].strip()
+        return cleaned
+
+    @classmethod
+    def _parse_service_account_json(cls, raw_value: str, source_name: str) -> dict[str, Any]:
+        """Interpreta um JSON de service account e valida o tipo basico do payload."""
+        cleaned = cls._strip_wrapping_quotes(raw_value)
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Conteudo invalido em {source_name}. "
+                "Informe o JSON completo da service account ou um base64 valido desse JSON."
+            ) from exc
+
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"Conteudo invalido em {source_name}. O payload precisa ser um objeto JSON."
+            )
+        return parsed
+
+    @classmethod
+    def _load_credentials_from_json_env(cls) -> dict[str, Any] | None:
         """Carrega credenciais completas a partir de JSON ou base64 no ambiente."""
-        raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-        raw_json_base64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", "").strip()
+        raw_json = cls._strip_wrapping_quotes(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
+        raw_json_base64 = cls._strip_wrapping_quotes(
+            os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", "")
+        )
 
         if raw_json_base64:
-            decoded_json = base64.b64decode(raw_json_base64).decode("utf-8")
-            return json.loads(decoded_json)
+            if raw_json_base64.startswith("{"):
+                return cls._parse_service_account_json(
+                    raw_json_base64,
+                    "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64",
+                )
+
+            try:
+                decoded_json = base64.b64decode(raw_json_base64, validate=True).decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError):
+                return cls._parse_service_account_json(
+                    raw_json_base64,
+                    "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64",
+                )
+
+            return cls._parse_service_account_json(
+                decoded_json,
+                "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64",
+            )
 
         if raw_json:
-            return json.loads(raw_json)
+            return cls._parse_service_account_json(raw_json, "GOOGLE_SERVICE_ACCOUNT_JSON")
 
         return None
 

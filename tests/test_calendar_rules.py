@@ -251,3 +251,82 @@ class TestCalendarRules:
 
         assert isinstance(result, SimpleNamespace)
         assert captured["info"]["client_email"] == "bot@example.com"
+
+    def test_get_service_accepts_raw_json_in_base64_env(self, monkeypatch):
+        service = CalendarService()
+        captured = {}
+        creds_payload = {
+            "type": "service_account",
+            "client_email": "bot@example.com",
+            "private_key": "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_JSON", raising=False)
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", json.dumps(creds_payload))
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_EMAIL", raising=False)
+        monkeypatch.delenv("GOOGLE_PRIVATE_KEY", raising=False)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.os.path.exists",
+            lambda path: False,
+        )
+
+        def fake_from_service_account_info(info, scopes):
+            captured["info"] = info
+            captured["scopes"] = scopes
+            return object()
+
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.Credentials.from_service_account_info",
+            fake_from_service_account_info,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.build",
+            lambda api_name, version, credentials: SimpleNamespace(),
+        )
+
+        result = service._get_service()
+
+        assert isinstance(result, SimpleNamespace)
+        assert captured["info"]["client_email"] == "bot@example.com"
+
+    def test_get_service_accepts_quoted_base64_env(self, monkeypatch):
+        service = CalendarService()
+        captured = {}
+        creds_payload = {
+            "type": "service_account",
+            "client_email": "bot@example.com",
+            "private_key": "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+        encoded_payload = base64.b64encode(json.dumps(creds_payload).encode("utf-8")).decode("utf-8")
+
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_JSON", raising=False)
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", f'"{encoded_payload}"')
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_EMAIL", raising=False)
+        monkeypatch.delenv("GOOGLE_PRIVATE_KEY", raising=False)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.os.path.exists",
+            lambda path: False,
+        )
+
+        def fake_from_service_account_info(info, scopes):
+            captured["info"] = info
+            captured["scopes"] = scopes
+            return object()
+
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.Credentials.from_service_account_info",
+            fake_from_service_account_info,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.build",
+            lambda api_name, version, credentials: SimpleNamespace(),
+        )
+
+        result = service._get_service()
+
+        assert isinstance(result, SimpleNamespace)
+        assert captured["info"]["client_email"] == "bot@example.com"
