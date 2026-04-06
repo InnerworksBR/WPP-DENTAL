@@ -6,6 +6,23 @@ def extract_digits(value: str) -> str:
     return "".join(char for char in value if char.isdigit())
 
 
+def normalize_conversation_phone(value: str) -> str:
+    """Normaliza telefones/JIDs do WhatsApp para um identificador consistente de conversa."""
+    raw_value = (value or "").strip()
+    if not raw_value:
+        return ""
+
+    local_part = raw_value.split("@", 1)[0].split(":", 1)[0].strip()
+    digits = extract_digits(local_part)
+    if not digits:
+        return local_part
+
+    if not digits.startswith("55") and len(digits) in (10, 11):
+        digits = f"55{digits}"
+
+    return digits
+
+
 def normalize_internal_phone(phone: str) -> str:
     """Normaliza para o formato interno da aplicacao: DDD + numero, sem codigo do pais."""
     digits = extract_digits(phone)

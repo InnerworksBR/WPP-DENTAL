@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from src.domain.policies.phone_service import normalize_conversation_phone
 from src.infrastructure.persistence.connection import close_db, get_db, init_db
 from src.infrastructure.integrations.calendar_service import CalendarService
 from src.interfaces.tools.patient_tool import SavePatientTool
@@ -113,3 +114,6 @@ class TestPhoneNormalization:
 
         assert captured["query"]["q"] == "13991743380"
         assert [event["id"] for event in events] == ["evt-old", "evt-new"]
+
+    def test_normalize_conversation_phone_removes_device_suffix(self):
+        assert normalize_conversation_phone("5513991743380:23@s.whatsapp.net") == "5513991743380"

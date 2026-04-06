@@ -6,7 +6,7 @@ import re
 import unicodedata
 from datetime import datetime, timedelta
 
-from ...domain.policies.phone_service import extract_digits
+from ...domain.policies.phone_service import normalize_conversation_phone
 from .connection import get_db
 
 
@@ -18,10 +18,7 @@ class OutboundMessageStore:
 
     @staticmethod
     def _normalize_phone(phone: str) -> str:
-        digits = extract_digits(phone or "")
-        if digits and not digits.startswith("55"):
-            digits = f"55{digits}"
-        return digits
+        return normalize_conversation_phone(phone)
 
     @staticmethod
     def _normalize_content(content: str) -> str:

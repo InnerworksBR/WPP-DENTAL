@@ -21,7 +21,7 @@ from ...application.services.conversation_state_service import ConversationState
 from ...application.services.handoff_service import HandoffService
 from ...application.services.patient_service import PatientService
 from ...domain.policies.appointment_offer_service import AppointmentOfferService
-from ...domain.policies.phone_service import normalize_internal_phone
+from ...domain.policies.phone_service import normalize_conversation_phone, normalize_internal_phone
 from ...domain.policies.scope_guard_service import ScopeGuardService
 from ...infrastructure.config.config_service import ConfigService
 from ...infrastructure.integrations.calendar_service import CalendarService
@@ -288,7 +288,7 @@ def _build_message_data(message_wrapper: dict[str, Any]) -> dict[str, str] | Non
     """Constroi o dict padrao com dados da mensagem."""
     key = message_wrapper.get("key", {})
     remote_jid = key.get("remoteJid", "")
-    phone = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
+    phone = normalize_conversation_phone(remote_jid)
 
     message = message_wrapper.get("message", {})
     text = (

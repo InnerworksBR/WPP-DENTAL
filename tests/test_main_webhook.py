@@ -643,6 +643,47 @@ class TestMainWebhook:
         assert history[-1]["role"] == "patient"
         assert history[-1]["content"] == "Oi"
 
+    def test_handoff_still_blocks_when_from_me_remote_jid_has_device_suffix(self, monkeypatch):
+        import src.main as main
+
+        call_count = {"process": 0, "send": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria responder"
+
+        async def fake_send_message(self, phone, message):
+            call_count["send"] += 1
+            return True
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+
+        doctor_payload = _build_from_me_payload("doctor-suffix-1", "Eu vou cuidar desse caso.")
+        doctor_payload["data"]["key"]["remoteJid"] = "5511999999999:17@s.whatsapp.net"
+
+        with TestClient(main.app) as client:
+            handoff_response = client.post(
+                "/webhook/message",
+                json=doctor_payload,
+                headers={"apikey": "test-secret"},
+            )
+            patient_response = client.post(
+                "/webhook/message",
+                json=_build_payload("patient-after-suffix-handoff"),
+                headers={"apikey": "test-secret"},
+            )
+
+        assert handoff_response.status_code == 200
+        assert handoff_response.json()["status"] == "handoff_activated"
+        assert patient_response.status_code == 200
+        assert patient_response.json()["status"] == "handoff_active"
+        assert call_count["process"] == 0
+        assert call_count["send"] == 0
+
     def test_outbound_bot_echo_does_not_activate_handoff(self, monkeypatch):
         import src.main as main
         from src.infrastructure.persistence import OutboundMessageStore
