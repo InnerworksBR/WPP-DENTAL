@@ -19,6 +19,19 @@ class ConversationWorkflowService:
     """Orquestra o atendimento usando regras de negocio e estado persistido."""
 
     _INTENT_PATTERNS = {
+        "address": (
+            "endereco",
+            "endereço",
+            "qual o endereco",
+            "qual o endereço",
+            "qual endereco",
+            "qual endereço",
+            "onde fica",
+            "onde e",
+            "onde é",
+            "local da clinica",
+            "local da consulta",
+        ),
         "reschedule": (
             "remarcar",
             "reagendar",
@@ -145,6 +158,10 @@ class ConversationWorkflowService:
         normalized = self._normalize(text)
         if not normalized:
             return ""
+
+        for keyword in self._INTENT_PATTERNS["address"]:
+            if self._contains_keyword(normalized, keyword):
+                return "address"
 
         for keyword in self._INTENT_PATTERNS["reschedule"]:
             if self._contains_keyword(normalized, keyword):
@@ -354,6 +371,19 @@ class ConversationWorkflowService:
             "Sua proxima consulta esta marcada para "
             f"{start_dt.strftime('%d/%m/%Y')} ({weekday_names[start_dt.weekday()]}) "
             f"as {start_dt.strftime('%H:%M')}. Se quiser, tambem posso te ajudar a remarcar ou cancelar."
+        )
+
+    def _handle_address_query(self) -> str:
+        """Responde perguntas simples sobre o endereco da clinica sem entrar no fluxo de agenda."""
+        address = self.config.get_doctor_address().strip()
+        if address:
+            return (
+                f"O endereco da clinica e {address}\n\n"
+                "Se precisar de mais alguma coisa, estou por aqui."
+            )
+        return (
+            "Ainda nao encontrei o endereco configurado da clinica. "
+            "Se preferir, posso pedir para a doutora te encaminhar essa informacao."
         )
 
     def _handle_cancel_confirmation(
@@ -595,10 +625,15 @@ class ConversationWorkflowService:
 
         state = ConversationStateService.get(patient_phone)
         known_patient = self.patients.find_by_phone(patient_phone)
+        detected_intent = self._detect_intent(patient_message)
 
         if is_first_message and state.stage != "idle":
             ConversationStateService.clear(patient_phone)
             state = ConversationState()
+
+        if detected_intent == "address":
+            ConversationStateService.clear(patient_phone)
+            return self._handle_address_query()
 
         if known_patient:
             state.patient_name = state.patient_name or known_patient["name"]
@@ -624,7 +659,7 @@ class ConversationWorkflowService:
                 ConversationStateService.save(patient_phone, state)
                 return self._ask_name(bool(is_first_message))
 
-        intent = self._detect_intent(patient_message) or state.intent
+        intent = detected_intent or state.intent
         if not intent:
             state.stage = "awaiting_intent"
             ConversationStateService.save(patient_phone, state)

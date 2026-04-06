@@ -269,3 +269,55 @@ class TestConversationWorkflowService:
         assert state.reschedule_event_id == "evt-1"
         assert state.stage == "awaiting_period"
         assert confirmation["status"] == "reschedule_requested"
+
+    def test_address_question_returns_clinic_address_without_entering_schedule_loop(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+        from src.application.services.patient_service import PatientService
+
+        init_db()
+        PatientService.upsert("5511999999999", "Cristian", "Amil Dental")
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Tenho consulta agendada mas nao lembro o endereco",
+            patient_name="Cristian",
+            is_first_message=False,
+        )
+
+        normalized = response.lower()
+        assert "benjamin constant" in normalized
+        assert "qual periodo" not in normalized
+        assert "sala 1114" in normalized
+
+    def test_address_question_clears_stale_schedule_state(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_state_service import ConversationState, ConversationStateService
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+        from src.application.services.patient_service import PatientService
+
+        init_db()
+        PatientService.upsert("5511999999999", "Cristian", "Amil Dental")
+        ConversationStateService.save(
+            "5511999999999",
+            ConversationState(
+                stage="awaiting_period",
+                intent="schedule",
+                patient_name="Cristian",
+                plan_name="Amil Dental",
+            ),
+        )
+
+        workflow = ConversationWorkflowService()
+        response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Ja marquei, quero so saber o endereco",
+            patient_name="Cristian",
+            is_first_message=False,
+        )
+        state = ConversationStateService.get("5511999999999")
+
+        assert "benjamin constant" in response.lower()
+        assert state.stage == "idle"
+        assert state.intent == ""
