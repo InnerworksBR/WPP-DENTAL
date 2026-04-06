@@ -329,11 +329,11 @@ class TestConversationWorkflowService:
         init_db()
         alerts = []
 
-        def fake_send_alert(self, **kwargs):
+        def fake_send_referral_alert(self, **kwargs):
             alerts.append(kwargs)
             return True
 
-        monkeypatch.setattr(AlertService, "send_alert", fake_send_alert)
+        monkeypatch.setattr(AlertService, "send_referral_alert", fake_send_referral_alert)
 
         workflow = ConversationWorkflowService()
         first_response = workflow.process_message(
@@ -350,9 +350,36 @@ class TestConversationWorkflowService:
         )
 
         assert "motivo da consulta" in first_response.lower()
+        assert "qual periodo" not in first_response.lower()
         assert "dra. tarcilia" in second_response.lower()
         assert alerts
-        assert "Avaliacao de rotina" in alerts[0]["summary"]
+        assert alerts[0]["patient_name"] == "Maria"
+        assert alerts[0]["patient_phone"] == "5511999999999"
+        assert alerts[0]["consultation_reason"] == "Avaliacao de rotina"
+        assert alerts[0]["referral_to"] == "Dra. Tarcilia"
+
+    def test_referral_plan_ignores_period_and_stays_out_of_priscila_schedule_flow(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_state_service import ConversationStateService
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+
+        init_db()
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Quero agendar pelo plano Caixa de Saude de Sao Vicente de manha",
+            patient_name="Maria",
+            is_first_message=False,
+        )
+        state = ConversationStateService.get("5511999999999")
+
+        normalized = response.lower()
+        assert "motivo da consulta" in normalized
+        assert "qual periodo" not in normalized
+        assert state.stage == "awaiting_referral_reason"
+        assert state.intent == ""
+        assert state.requested_period == ""
 
     def test_orthodontics_with_allowed_plan_requests_card_photo(self, monkeypatch):
         from src.infrastructure.persistence.connection import init_db

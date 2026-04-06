@@ -53,6 +53,31 @@ class AlertService:
 
         return self.whatsapp.send_message_sync(doctor_phone, message)
 
+    def send_referral_alert(
+        self,
+        *,
+        patient_name: str,
+        patient_phone: str,
+        consultation_reason: str,
+        referral_to: str,
+    ) -> bool:
+        """Envia um encaminhamento objetivo com apenas os dados necessarios."""
+        doctor_phone = self.config.get_doctor_phone()
+
+        if not doctor_phone:
+            logger.error("Telefone da doutora nÃ£o configurado!")
+            return False
+
+        message = self.config.get_message(
+            "alerts.referral_to_specialist",
+            patient_name=patient_name or "NÃ£o informado",
+            patient_phone=patient_phone,
+            consultation_reason=consultation_reason or "NÃ£o informado",
+            referral_to=referral_to or "profissional parceira",
+        )
+
+        return self.whatsapp.send_message_sync(doctor_phone, message)
+
     def notify_patient_escalation(self, patient_phone: str) -> bool:
         """
         Informa ao paciente que a doutora entrará em contato.

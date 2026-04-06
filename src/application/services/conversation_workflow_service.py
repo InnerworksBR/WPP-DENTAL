@@ -375,20 +375,20 @@ class ConversationWorkflowService:
     ) -> str:
         referral_to = self.config.get_plan_referral_target(state.plan_name) or "profissional parceira"
         reason_text = state.requested_reason or self._extract_freeform_reason(patient_message) or "Motivo nao informado"
-        summary = (
-            f"Encaminhar para {referral_to}. Convenio: {state.plan_name}. "
-            f"Motivo da consulta: {reason_text}."
-        )
+        summary = f"Encaminhamento para {referral_to}. Motivo: {reason_text}."
 
         self.patients.upsert(phone, state.patient_name, state.plan_name)
         self.patients.save_interaction(phone, "referral", summary)
-        self._send_operational_alert(
-            phone=phone,
-            patient_name=state.patient_name,
-            summary=summary,
-            reason="encaminhamento",
-            last_message=patient_message,
-        )
+        try:
+            AlertService().send_referral_alert(
+                patient_name=state.patient_name,
+                patient_phone=phone,
+                consultation_reason=reason_text,
+                referral_to=referral_to,
+            )
+        except Exception:
+            # O atendimento ao paciente nao deve falhar por causa do alerta interno.
+            pass
 
         message = self.config.get_plan_referral_message(
             state.plan_name,
@@ -891,6 +891,13 @@ class ConversationWorkflowService:
         if self.config.is_referral_plan(state.plan_name):
             if not state.requested_reason:
                 state.stage = "awaiting_referral_reason"
+                state.intent = ""
+                state.requested_period = ""
+                state.requested_date = ""
+                state.pending_event_id = ""
+                state.pending_event_label = ""
+                state.reschedule_event_id = ""
+                state.reschedule_event_label = ""
                 ConversationStateService.save(phone, state)
                 return self.config.get_message(
                     "referral.ask_reason",
