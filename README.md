@@ -85,64 +85,12 @@ O projeto agora pode ser publicado direto pelo Git usando o `Dockerfile` da raiz
 - `PORT=3000`
 - `WORKERS=1`
 - `ENABLE_APPOINTMENT_CONFIRMATION_SCHEDULER=1`
-- `CONVERSATION_ENGINE=legacy` por padrao
 
 ### Observacoes importantes
 
 - Como o banco atual e SQLite, mantenha apenas `1` replica no EasyPanel.
 - O cron interno das 20h roda dentro da aplicacao, entao o container precisa permanecer online nesse horario.
 - Se usar mais de um processo ou mais de uma replica, voce corre risco de comportamento concorrente indesejado com SQLite.
-
-## Migracao para Rasa CALM
-
-O repositorio agora inclui uma base de migracao em [`rasa_assistant/`](./rasa_assistant/).
-
-### O que essa migracao cobre agora
-
-- perguntas contextuais sobre convenios
-- perguntas sobre endereco
-- regras operacionais de procedimento
-- encaminhamento enxuto para Dra. Tarcilia
-- rephrase das respostas para soar mais natural
-- fallback controlado para o workflow legado em agendamento, remarcacao, cancelamento e consulta
-
-### Como o backend atual conversa com o Rasa
-
-O webhook FastAPI continua sendo a porta de entrada da Evolution. Quando `CONVERSATION_ENGINE=rasa`, ele passa a enviar a mensagem para o Rasa via REST webhook e, se o Rasa estiver indisponivel, pode voltar automaticamente para o motor legado com `RASA_FALLBACK_TO_LEGACY=1`.
-
-Variaveis novas:
-
-- `CONVERSATION_ENGINE=rasa`
-- `RASA_ASSISTANT_URL=http://wpp-dental-rasa:5005`
-- `RASA_TIMEOUT_SECONDS=15`
-- `RASA_FALLBACK_TO_LEGACY=1`
-- `RASA_PRO_LICENSE=...`
-- `RASA_OPENAI_MODEL=gpt-4o-mini`
-
-### Servico extra no EasyPanel
-
-Para rodar o Rasa em producao, suba um segundo servico apontando para este mesmo repositorio:
-
-- Dockerfile: `Dockerfile.rasa`
-- Porta interna: `5005`
-- Replicas: `1`
-- Volume persistente: `/app/data`
-
-Variaveis do servico Rasa:
-
-- `OPENAI_API_KEY`
-- `RASA_PRO_LICENSE`
-- `RASA_OPENAI_MODEL`
-- `DATABASE_PATH=/app/data/dental.db`
-- `GOOGLE_CALENDAR_ID`
-- `GOOGLE_SERVICE_ACCOUNT_FILE` ou uma das alternativas em JSON
-- `DOCTOR_PHONE`
-
-No servico principal da API, aponte `RASA_ASSISTANT_URL` para o hostname interno do servico Rasa, por exemplo `http://wpp-dental-rasa:5005`.
-
-### Limitacao importante
-
-O projeto ja esta preparado para a migracao hibrida, mas eu nao validei o runtime do Rasa localmente neste ambiente porque o pacote/licenca do Rasa Pro nao estava instalado aqui. O que ficou validado nesta maquina foi a integracao do backend, o bridge HTTP, o fallback e a camada de contexto reaproveitada pelas actions.
 
 ## Deploy na VPS
 
