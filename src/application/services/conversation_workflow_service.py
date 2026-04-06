@@ -358,7 +358,9 @@ class ConversationWorkflowService:
         return parsed.strftime("%d/%m/%Y")
 
     def _extract_plan_name(self, text: str, current_plan: str = "") -> str:
-        plan = self.config.get_plan_by_name(text)
+        plan = self.config.extract_plan_from_text(text)
+        if plan is None:
+            plan = self.config.get_plan_by_name(text)
         if plan is None:
             plan = self.config.find_plan_fuzzy(text)
         if plan:

@@ -76,6 +76,17 @@ class TestConfigService:
         assert target == "Dra. Tarcilia"
         assert "Dra. Tarcilia" in message
 
+    def test_extract_plan_from_long_sentence(self):
+        """Extrai um convenio mesmo quando ele vem dentro de uma frase natural."""
+        from src.infrastructure.config.config_service import ConfigService
+
+        ConfigService._instance = None
+        config = ConfigService()
+
+        plan = config.extract_plan_from_text("voces atendem caixa de peculio?")
+        assert plan is not None
+        assert plan["name"] == "Caixa de Peculio de Sao Vicente"
+
     def test_get_periods(self):
         """Verifica se os períodos estão configurados corretamente."""
         from src.infrastructure.config.config_service import ConfigService

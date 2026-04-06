@@ -72,6 +72,8 @@ plans:
     aliases:
       - "Caixa de Saúde de São Vicente"
       - "Caixa de Saude Sao Vicente"
+      - "Caixa de Saude"
+      - "Caixa Saude"
     active: true
     referral: true
     referral_to: "Dra. Tarcilia"
@@ -84,6 +86,9 @@ plans:
     aliases:
       - "Caixa de Pecúlio de São Vicente"
       - "Caixa de Peculio Sao Vicente"
+      - "Caixa de Peculio"
+      - "Caixa Peculio"
+      - "Peculio"
     active: true
     referral: true
     referral_to: "Dra. Tarcilia"

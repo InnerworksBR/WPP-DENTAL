@@ -1,7 +1,7 @@
 """Serviço de leitura de configurações YAML."""
 
 import os
-from difflib import get_close_matches
+from difflib import SequenceMatcher, get_close_matches
 import re
 import unicodedata
 import yaml
@@ -47,6 +47,21 @@ class ConfigService:
         if isinstance(aliases, list):
             candidates.extend(str(alias).strip() for alias in aliases if str(alias).strip())
         return [candidate for candidate in candidates if candidate]
+
+    @staticmethod
+    def _informative_tokens(text: str) -> list[str]:
+        stopwords = {
+            "a", "as", "o", "os",
+            "de", "da", "das", "do", "dos",
+            "e", "ou", "por", "para",
+            "pela", "pelo", "com",
+            "no", "na", "nos", "nas",
+        }
+        return [
+            token
+            for token in re.findall(r"[a-z0-9]+", text or "")
+            if token and token not in stopwords
+        ]
 
     def _resolve_plan(self, value: str) -> Optional[dict[str, Any]]:
         target = self._normalize_lookup(value)
@@ -135,6 +150,59 @@ class ConfigService:
             return candidate_map[close_match[0]]
 
         return None
+
+    def extract_plan_from_text(self, text: str) -> Optional[dict[str, Any]]:
+        """Extrai um convenio citado dentro de uma frase mais longa."""
+        normalized_text = self._normalize_lookup(text)
+        if not normalized_text:
+            return None
+
+        exact = self.get_plan_by_name(normalized_text)
+        if exact is not None:
+            return exact
+
+        fuzzy = self.find_plan_fuzzy(normalized_text)
+        if fuzzy is not None:
+            return fuzzy
+
+        text_tokens = set(self._informative_tokens(normalized_text))
+        best_plan: Optional[dict[str, Any]] = None
+        best_score = 0.0
+
+        for plan in self.get_plans():
+            for candidate in self._iter_plan_candidates(plan):
+                normalized_candidate = self._normalize_lookup(candidate)
+                if not normalized_candidate:
+                    continue
+
+                if normalized_candidate in normalized_text:
+                    return plan
+
+                candidate_tokens = set(self._informative_tokens(normalized_candidate))
+                if not candidate_tokens:
+                    continue
+
+                matched_tokens = candidate_tokens.intersection(text_tokens)
+                coverage = len(matched_tokens) / len(candidate_tokens)
+                if coverage < 0.6:
+                    continue
+
+                similarity = 0.0
+                for fragment in re.split(r"[?!.,;:()\\-]+", normalized_text):
+                    fragment = fragment.strip()
+                    if not fragment:
+                        continue
+                    similarity = max(
+                        similarity,
+                        SequenceMatcher(None, fragment, normalized_candidate).ratio(),
+                    )
+
+                score = coverage + (similarity * 0.25)
+                if score > best_score:
+                    best_score = score
+                    best_plan = plan
+
+        return best_plan
 
     def get_referral_plans(self) -> list[dict[str, Any]]:
         """Retorna planos que devem ser encaminhados para outra doutora."""

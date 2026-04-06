@@ -536,6 +536,25 @@ class TestConversationWorkflowService:
         assert "motivo da consulta" not in normalized
         assert state.stage == "idle"
 
+    def test_referral_plan_question_with_short_name_is_answered_directly(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+
+        init_db()
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511666666666",
+            patient_message="voces atendem caixa de peculio?",
+            patient_name="Cristian",
+            is_first_message=False,
+        )
+
+        normalized = response.lower()
+        assert "dra. tarcilia" in normalized
+        assert "o que voce gostaria de fazer" not in normalized
+        assert "nome completo" not in normalized
+
     def test_brief_plan_follow_up_is_answered_contextually(self):
         from src.infrastructure.persistence.connection import init_db
         from src.application.services.conversation_workflow_service import ConversationWorkflowService
