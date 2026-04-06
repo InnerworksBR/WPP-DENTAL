@@ -55,6 +55,41 @@ uvicorn src.main:app --host 0.0.0.0 --port 3000 --reload
 .\.venv\Scripts\python -m pytest -q
 ```
 
+## Deploy no EasyPanel
+
+O projeto agora pode ser publicado direto pelo Git usando o `Dockerfile` da raiz.
+
+### Configuracao recomendada
+
+- Source: repositorio Git
+- Port: `3000`
+- Replicas/instances: `1`
+- Volume persistente para `/app/data`
+- Volume ou secret file para `/app/credentials/service-account.json` se usar arquivo JSON do Google
+
+### Variaveis de ambiente
+
+- `OPENAI_API_KEY`
+- `EVOLUTION_API_URL`
+- `EVOLUTION_API_KEY`
+- `EVOLUTION_INSTANCE`
+- `WEBHOOK_API_KEY`
+- `GOOGLE_CALENDAR_ID`
+- `GOOGLE_SERVICE_ACCOUNT_FILE=/app/credentials/service-account.json`
+- `GOOGLE_SERVICE_ACCOUNT_EMAIL` e `GOOGLE_PRIVATE_KEY` como alternativa ao arquivo
+- `DOCTOR_PHONE`
+- `DATABASE_PATH=/app/data/dental.db`
+- `HOST=0.0.0.0`
+- `PORT=3000`
+- `WORKERS=1`
+- `ENABLE_APPOINTMENT_CONFIRMATION_SCHEDULER=1`
+
+### Observacoes importantes
+
+- Como o banco atual e SQLite, mantenha apenas `1` replica no EasyPanel.
+- O cron interno das 20h roda dentro da aplicacao, entao o container precisa permanecer online nesse horario.
+- Se usar mais de um processo ou mais de uma replica, voce corre risco de comportamento concorrente indesejado com SQLite.
+
 ## Deploy na VPS
 
 ### 1. Preparar a aplicacao

@@ -4,7 +4,7 @@ import os
 import threading
 import unicodedata
 from datetime import datetime, time, timedelta
-from typing import Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from google.oauth2.service_account import Credentials
@@ -69,6 +69,47 @@ class CalendarService:
         """Normaliza nomes de periodo para comparacoes robustas."""
         normalized = unicodedata.normalize("NFKD", period)
         return normalized.encode("ascii", "ignore").decode("ascii").lower().strip()
+
+    @staticmethod
+    def _extract_description_field(description: str, field_name: str) -> str:
+        """Extrai um campo simples do texto padrao salvo na descricao do evento."""
+        expected_prefix = f"{field_name}:".lower()
+        for raw_line in (description or "").splitlines():
+            line = raw_line.strip()
+            if line.lower().startswith(expected_prefix):
+                return line.split(":", 1)[1].strip()
+        return ""
+
+    @classmethod
+    def _extract_patient_phone_from_event(cls, event: dict[str, Any]) -> str:
+        """Tenta localizar o telefone do paciente no resumo ou descricao do evento."""
+        description = str(event.get("description", "") or "")
+        summary = str(event.get("summary", "") or "")
+
+        candidates = [
+            cls._extract_description_field(description, "Telefone"),
+            summary.split(" - ", 1)[1].strip() if " - " in summary else "",
+            summary,
+        ]
+        for candidate in candidates:
+            normalized = cls._normalize_phone(candidate)
+            if len(normalized) >= 10:
+                return normalized[-11:]
+        return ""
+
+    @classmethod
+    def _extract_patient_name_from_event(cls, event: dict[str, Any]) -> str:
+        """Resolve o nome do paciente salvo no evento do Google Calendar."""
+        description = str(event.get("description", "") or "")
+        summary = str(event.get("summary", "") or "")
+
+        description_name = cls._extract_description_field(description, "Paciente")
+        if description_name:
+            return description_name
+
+        if " - " in summary:
+            return summary.split(" - ", 1)[0].strip()
+        return summary.strip()
 
     def _iter_period_bounds(self) -> list[tuple[time, time]]:
         """Retorna os horarios configurados para atendimento."""
@@ -294,6 +335,43 @@ class CalendarService:
                 return event
 
         return events[0] if len(events) == 1 else None
+
+    def find_patient_appointments_for_date(self, date: datetime) -> list[dict[str, Any]]:
+        """Lista consultas de pacientes em uma data, com nome e telefone normalizados."""
+        date_sp = self._normalize_datetime(date)
+        appointments = []
+
+        for event in self.get_events(date_sp):
+            if str(event.get("status", "")).lower() == "cancelled":
+                continue
+
+            start_str = event.get("start", {}).get("dateTime")
+            end_str = event.get("end", {}).get("dateTime")
+            if not start_str or not end_str:
+                continue
+
+            start_time = self._normalize_datetime(datetime.fromisoformat(start_str))
+            end_time = self._normalize_datetime(datetime.fromisoformat(end_str))
+            if start_time.date() != date_sp.date():
+                continue
+
+            patient_phone = self._extract_patient_phone_from_event(event)
+            if not patient_phone:
+                continue
+
+            appointments.append(
+                {
+                    "event_id": str(event.get("id", "")).strip(),
+                    "patient_name": self._extract_patient_name_from_event(event),
+                    "patient_phone": patient_phone,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "raw_event": event,
+                }
+            )
+
+        appointments.sort(key=lambda item: item["start_time"])
+        return appointments
 
     def find_appointments_by_phone(self, phone: str) -> list[dict]:
         """Busca todas as consultas futuras de um paciente pelo telefone."""

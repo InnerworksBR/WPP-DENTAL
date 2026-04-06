@@ -147,3 +147,125 @@ class TestConversationWorkflowService:
         assert "deseja realmente cancelar" in first.lower()
         assert "cancelada com sucesso" in second.lower()
         assert state.stage == "idle"
+
+    def test_day_before_confirmation_yes_keeps_appointment_confirmed(self):
+        from src.infrastructure.persistence.connection import get_db, init_db
+        from src.application.services.appointment_confirmation_service import AppointmentConfirmationService
+        from src.application.services.conversation_state_service import ConversationState, ConversationStateService
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+        from src.application.services.patient_service import PatientService
+
+        init_db()
+        PatientService.upsert("5511999999999", "Maria Silva", "Amil Dental")
+        db = get_db()
+        db.execute(
+            "INSERT INTO appointment_confirmations "
+            "(event_id, phone, patient_name, reminder_type, appointment_start, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "evt-1",
+                "5511999999999",
+                "Maria Silva",
+                AppointmentConfirmationService.REMINDER_TYPE_DAY_BEFORE,
+                "2026-04-07T08:00:00-03:00",
+                "sent",
+            ),
+        )
+        db.commit()
+        ConversationStateService.save(
+            "5511999999999",
+            ConversationState(
+                stage=AppointmentConfirmationService.CONFIRMATION_STAGE,
+                patient_name="Maria Silva",
+                plan_name="Amil Dental",
+                pending_event_id="evt-1",
+                pending_event_label="07/04/2026 as 08:00",
+                reschedule_event_id="evt-1",
+                reschedule_event_label="07/04/2026 as 08:00",
+                metadata={
+                    AppointmentConfirmationService.METADATA_EVENT_ID_KEY: "evt-1",
+                    AppointmentConfirmationService.METADATA_START_KEY: "2026-04-07T08:00:00-03:00",
+                },
+            ),
+        )
+
+        workflow = ConversationWorkflowService()
+        response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Sim, vou sim",
+            patient_name="Maria",
+            is_first_message=False,
+        )
+
+        state = ConversationStateService.get("5511999999999")
+        confirmation = get_db().execute(
+            "SELECT status, response_text FROM appointment_confirmations WHERE event_id = ?",
+            ("evt-1",),
+        ).fetchone()
+
+        assert "continua confirmada" in response.lower()
+        assert state.stage == "idle"
+        assert confirmation["status"] == "confirmed"
+        assert "vou sim" in confirmation["response_text"].lower()
+
+    def test_day_before_confirmation_negative_response_starts_reschedule_flow(self):
+        from src.infrastructure.persistence.connection import get_db, init_db
+        from src.application.services.appointment_confirmation_service import AppointmentConfirmationService
+        from src.application.services.conversation_state_service import ConversationState, ConversationStateService
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+        from src.application.services.patient_service import PatientService
+
+        init_db()
+        PatientService.upsert("5511999999999", "Maria Silva", "Amil Dental")
+        db = get_db()
+        db.execute(
+            "INSERT INTO appointment_confirmations "
+            "(event_id, phone, patient_name, reminder_type, appointment_start, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "evt-1",
+                "5511999999999",
+                "Maria Silva",
+                AppointmentConfirmationService.REMINDER_TYPE_DAY_BEFORE,
+                "2026-04-07T08:00:00-03:00",
+                "sent",
+            ),
+        )
+        db.commit()
+        ConversationStateService.save(
+            "5511999999999",
+            ConversationState(
+                stage=AppointmentConfirmationService.CONFIRMATION_STAGE,
+                patient_name="Maria Silva",
+                plan_name="Amil Dental",
+                pending_event_id="evt-1",
+                pending_event_label="07/04/2026 as 08:00",
+                reschedule_event_id="evt-1",
+                reschedule_event_label="07/04/2026 as 08:00",
+                metadata={
+                    AppointmentConfirmationService.METADATA_EVENT_ID_KEY: "evt-1",
+                    AppointmentConfirmationService.METADATA_START_KEY: "2026-04-07T08:00:00-03:00",
+                },
+            ),
+        )
+
+        workflow = ConversationWorkflowService()
+        response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Nao vou conseguir, preciso remarcar",
+            patient_name="Maria",
+            is_first_message=False,
+        )
+
+        state = ConversationStateService.get("5511999999999")
+        confirmation = get_db().execute(
+            "SELECT status FROM appointment_confirmations WHERE event_id = ?",
+            ("evt-1",),
+        ).fetchone()
+
+        assert "vamos remarcar" in response.lower()
+        assert "qual periodo" in response.lower()
+        assert state.intent == "reschedule"
+        assert state.reschedule_event_id == "evt-1"
+        assert state.stage == "awaiting_period"
+        assert confirmation["status"] == "reschedule_requested"

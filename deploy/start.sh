@@ -14,4 +14,15 @@ HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-3000}"
 WORKERS="${WORKERS:-1}"
 
-exec ./.venv/bin/uvicorn src.main:app --host "$HOST" --port "$PORT" --workers "$WORKERS"
+if [[ -x "./.venv/bin/uvicorn" ]]; then
+  UVICORN_BIN="./.venv/bin/uvicorn"
+else
+  UVICORN_BIN="$(command -v uvicorn || true)"
+fi
+
+if [[ -z "${UVICORN_BIN:-}" ]]; then
+  echo "uvicorn nao encontrado. Instale as dependencias antes de iniciar a aplicacao." >&2
+  exit 1
+fi
+
+exec "$UVICORN_BIN" src.main:app --host "$HOST" --port "$PORT" --workers "$WORKERS"

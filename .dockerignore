@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+.pytest_cache
+.idea
+.claude
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+data
+credentials
+wpp_dental.egg-info

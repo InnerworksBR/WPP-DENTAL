@@ -68,3 +68,39 @@ class TestCalendarRules:
 
         with pytest.raises(ValueError, match="fora dos periodos de atendimento"):
             service.create_appointment_if_available("Maria", "5511999999999", invalid_time)
+
+    def test_find_patient_appointments_for_date_extracts_name_and_phone(self, monkeypatch):
+        service = CalendarService()
+
+        monkeypatch.setattr(
+            service,
+            "get_events",
+            lambda date, time_min=None, time_max=None: [
+                {
+                    "id": "evt-1",
+                    "summary": "Maria Silva - 11999999999",
+                    "description": (
+                        "Agendamento automatico via WhatsApp\n"
+                        "Paciente: Maria Silva\n"
+                        "Telefone: 11999999999"
+                    ),
+                    "start": {"dateTime": "2026-04-07T08:00:00-03:00"},
+                    "end": {"dateTime": "2026-04-07T08:15:00-03:00"},
+                },
+                {
+                    "id": "evt-2",
+                    "summary": "Bloqueio interno",
+                    "start": {"dateTime": "2026-04-07T09:00:00-03:00"},
+                    "end": {"dateTime": "2026-04-07T09:15:00-03:00"},
+                },
+            ],
+        )
+
+        appointments = service.find_patient_appointments_for_date(
+            datetime(2026, 4, 7, 0, 0, tzinfo=SAO_PAULO_TZ)
+        )
+
+        assert len(appointments) == 1
+        assert appointments[0]["event_id"] == "evt-1"
+        assert appointments[0]["patient_name"] == "Maria Silva"
+        assert appointments[0]["patient_phone"] == "11999999999"

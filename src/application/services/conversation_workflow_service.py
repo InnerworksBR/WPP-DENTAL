@@ -8,6 +8,7 @@ import unicodedata
 from datetime import datetime, timedelta
 from typing import Any
 
+from .appointment_confirmation_service import AppointmentConfirmationService
 from .conversation_state_service import ConversationState, ConversationStateService
 from .patient_service import PatientService
 from ...infrastructure.config.config_service import ConfigService
@@ -393,6 +394,107 @@ class ConversationWorkflowService:
             time=time_str,
         ).strip()
 
+    @staticmethod
+    def _split_event_label(label: str) -> tuple[str, str]:
+        if " as " not in label:
+            return "", ""
+        date_str, time_str = label.split(" as ", 1)
+        return date_str.strip(), time_str.strip()
+
+    def _handle_pending_appointment_confirmation(
+        self,
+        phone: str,
+        state: ConversationState,
+        patient_message: str,
+    ) -> str:
+        label = state.pending_event_label or state.reschedule_event_label
+        date_str, time_str = self._split_event_label(label)
+        event_id = (
+            state.metadata.get(AppointmentConfirmationService.METADATA_EVENT_ID_KEY)
+            or state.pending_event_id
+            or state.reschedule_event_id
+        )
+        appointment_start = state.metadata.get(
+            AppointmentConfirmationService.METADATA_START_KEY,
+            "",
+        )
+
+        if AppointmentConfirmationService.wants_cancellation(patient_message):
+            AppointmentConfirmationService.mark_patient_response(
+                event_id=event_id,
+                appointment_start=appointment_start,
+                status="cancel_requested",
+                response_text=patient_message,
+            )
+            state.stage = "awaiting_cancel_confirmation"
+            state.intent = "cancel"
+            state.pending_event_id = state.pending_event_id or state.reschedule_event_id
+            state.pending_event_label = label
+            AppointmentConfirmationService.clear_confirmation_metadata(state)
+            ConversationStateService.save(phone, state)
+
+            if date_str and time_str:
+                return self.config.get_message(
+                    "cancel.confirm",
+                    date=date_str,
+                    time=time_str,
+                ).strip()
+            return "Deseja realmente cancelar sua consulta?"
+
+        wants_reschedule = (
+            AppointmentConfirmationService.needs_reschedule_response(patient_message)
+            or bool(self._extract_period(patient_message))
+            or bool(self._extract_date(patient_message))
+        )
+        if wants_reschedule:
+            AppointmentConfirmationService.mark_patient_response(
+                event_id=event_id,
+                appointment_start=appointment_start,
+                status="reschedule_requested",
+                response_text=patient_message,
+            )
+            state.stage = "idle"
+            state.intent = "reschedule"
+            state.reschedule_event_id = state.reschedule_event_id or state.pending_event_id
+            state.reschedule_event_label = state.reschedule_event_label or label
+            state.pending_event_id = ""
+            state.pending_event_label = ""
+            state.requested_period = ""
+            state.requested_date = ""
+            AppointmentConfirmationService.clear_confirmation_metadata(state)
+
+            intro = self.config.get_message(
+                "appointment_confirmation.reschedule_intro",
+                date=date_str,
+                time=time_str,
+            ).strip()
+            follow_up = self._prepare_schedule_or_reschedule(phone, patient_message, state)
+            if intro:
+                return f"{intro}\n\n{follow_up}".strip()
+            return follow_up
+
+        if AppointmentConfirmationService.is_affirmative_response(patient_message):
+            AppointmentConfirmationService.mark_patient_response(
+                event_id=event_id,
+                appointment_start=appointment_start,
+                status="confirmed",
+                response_text=patient_message,
+            )
+            ConversationStateService.clear(phone)
+
+            return self.config.get_message(
+                "appointment_confirmation.confirmed",
+                date=date_str,
+                time=time_str,
+                doctor_name=self.config.get_doctor_name(),
+            ).strip()
+
+        return self.config.get_message(
+            "appointment_confirmation.clarify",
+            date=date_str,
+            time=time_str,
+        ).strip()
+
     def _prepare_schedule_or_reschedule(
         self,
         phone: str,
@@ -501,6 +603,13 @@ class ConversationWorkflowService:
         if known_patient:
             state.patient_name = state.patient_name or known_patient["name"]
             state.plan_name = state.plan_name or known_patient["plan"]
+
+        if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
+            return self._handle_pending_appointment_confirmation(
+                patient_phone,
+                state,
+                patient_message,
+            )
 
         if state.stage == "awaiting_cancel_confirmation":
             return self._handle_cancel_confirmation(patient_phone, state, patient_message)

@@ -1,9 +1,10 @@
 """Servidor webhook principal do WPP-DENTAL."""
 
+import asyncio
 import hmac
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -14,6 +15,7 @@ from fastapi.responses import JSONResponse
 load_dotenv()
 
 from ...application.orchestration.dental_crew import DentalCrew
+from ...application.services.appointment_confirmation_service import AppointmentConfirmationService
 from ...application.services.conversation_service import ConversationService
 from ...application.services.conversation_state_service import ConversationStateService
 from ...application.services.patient_service import PatientService
@@ -34,6 +36,32 @@ _webhook_auth_warning_logged = False
 _webhook_auth_mismatch_warning_logged = False
 
 
+async def _run_appointment_confirmation_scheduler() -> None:
+    """Executa o cron interno diario para confirmar consultas do dia seguinte."""
+    service = AppointmentConfirmationService()
+
+    while True:
+        next_run = service.get_next_run_datetime()
+        sleep_seconds = max((next_run - datetime.now(next_run.tzinfo)).total_seconds(), 1)
+        logger.info(
+            "Proxima rotina de confirmacao automatica agendada para %s",
+            next_run.strftime("%d/%m/%Y %H:%M:%S"),
+        )
+        await asyncio.sleep(sleep_seconds)
+
+        try:
+            result = await service.send_next_day_confirmations(reference_time=next_run)
+            logger.info("Rotina de confirmacao automatica concluida: %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Falha na rotina de confirmacao automatica: %s",
+                exc,
+                exc_info=True,
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gerencia startup e shutdown da aplicacao."""
@@ -46,12 +74,28 @@ async def lifespan(app: FastAPI):
     logger.info("Doutora: %s", config.get_doctor_name())
     logger.info("Planos ativos: %s", ", ".join(config.get_plan_names()))
     logger.info("Modelo LLM: %s", config.get_openai_model())
+    scheduler_task = None
+    if AppointmentConfirmationService.scheduler_enabled():
+        scheduler_task = asyncio.create_task(_run_appointment_confirmation_scheduler())
+        app.state.appointment_confirmation_scheduler = scheduler_task
+        logger.info(
+            "Cron interno de confirmacao diaria habilitado para %02d:00 (America/Sao_Paulo)",
+            AppointmentConfirmationService.REMINDER_HOUR,
+        )
+    else:
+        logger.info("Cron interno de confirmacao diaria desabilitado por configuracao")
     logger.info("WPP-DENTAL pronto para atender")
 
-    yield
+    try:
+        yield
+    finally:
+        if scheduler_task is not None:
+            scheduler_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await scheduler_task
 
-    close_db()
-    logger.info("WPP-DENTAL encerrado")
+        close_db()
+        logger.info("WPP-DENTAL encerrado")
 
 
 app = FastAPI(

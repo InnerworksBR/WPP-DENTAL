@@ -49,6 +49,29 @@ scheduling:
     Nao encontrei horarios livres nesse periodo. 😕
     Se quiser, posso tentar outro periodo ou outra data.
 
+appointment_confirmation:
+  day_before: |
+    Oi, {patient_name}. Passando para confirmar sua consulta de amanha.
+
+    Data: {date}
+    Horario: {time}
+    Dentista: {doctor_name}
+
+    Voce consegue comparecer?
+    Se precisar remarcar, me avise por aqui.
+  confirmed: |
+    Perfeito. Sua consulta de amanha continua confirmada.
+
+    Data: {date}
+    Horario: {time}
+
+    Caso precise remarcar ou cancelar, e so me chamar.
+  reschedule_intro: |
+    Tudo bem. Vamos remarcar sua consulta que estava marcada para {date} as {time}.
+  clarify: |
+    Para eu confirmar sua consulta de {date} as {time}, me responda com sim.
+    Se precisar remarcar, me diga o periodo desejado ou a nova data.
+
 cancel:
   confirm: |
     Encontrei sua consulta 📌
