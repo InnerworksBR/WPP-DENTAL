@@ -6,6 +6,8 @@ from typing import Optional
 
 import httpx
 
+from ..persistence.outbound_message_store import OutboundMessageStore
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,6 +67,7 @@ class WhatsAppService:
                     headers=self._get_headers(),
                 )
                 response.raise_for_status()
+                OutboundMessageStore.record(formatted_phone, message)
                 logger.info(f"Mensagem enviada para {formatted_phone}")
                 return True
         except httpx.HTTPError as e:
@@ -91,6 +94,7 @@ class WhatsAppService:
                     headers=self._get_headers(),
                 )
                 response.raise_for_status()
+                OutboundMessageStore.record(formatted_phone, message)
                 logger.info(f"Mensagem enviada para {formatted_phone}")
                 return True
         except httpx.HTTPError as e:

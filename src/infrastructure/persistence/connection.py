@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS appointment_confirmations (
     UNIQUE(event_id, reminder_type, appointment_start)
 );
 
+CREATE TABLE IF NOT EXISTS outbound_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_patients_phone ON patients(phone);
 CREATE INDEX IF NOT EXISTS idx_interactions_patient ON interactions(patient_id);
 CREATE INDEX IF NOT EXISTS idx_conversation_phone ON conversation_history(phone);
@@ -72,6 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_conversation_state_updated_at ON conversation_sta
 CREATE INDEX IF NOT EXISTS idx_processed_messages_at ON processed_messages(processed_at);
 CREATE INDEX IF NOT EXISTS idx_appointment_confirmations_phone ON appointment_confirmations(phone);
 CREATE INDEX IF NOT EXISTS idx_appointment_confirmations_status ON appointment_confirmations(status);
+CREATE INDEX IF NOT EXISTS idx_outbound_messages_phone ON outbound_messages(phone);
 """
 
 

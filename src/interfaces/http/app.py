@@ -18,12 +18,14 @@ from ...application.orchestration.dental_crew import DentalCrew
 from ...application.services.appointment_confirmation_service import AppointmentConfirmationService
 from ...application.services.conversation_service import ConversationService
 from ...application.services.conversation_state_service import ConversationStateService
+from ...application.services.handoff_service import HandoffService
 from ...application.services.patient_service import PatientService
 from ...domain.policies.appointment_offer_service import AppointmentOfferService
 from ...domain.policies.phone_service import normalize_internal_phone
 from ...domain.policies.scope_guard_service import ScopeGuardService
 from ...infrastructure.config.config_service import ConfigService
 from ...infrastructure.integrations.calendar_service import CalendarService
+from ...infrastructure.persistence import OutboundMessageStore
 from ...infrastructure.persistence.connection import close_db, get_db, init_db
 
 logging.basicConfig(
@@ -152,6 +154,7 @@ async def receive_message(request: Request):
     text = message_data["text"]
     contact_name = message_data.get("contact_name", "")
     message_id = message_data.get("message_id", "")
+    from_me = message_data.get("from_me", "") == "1"
 
     if message_id:
         claimed, state = _try_claim_message_processing(message_id, phone)
@@ -161,7 +164,35 @@ async def receive_message(request: Request):
                 {"status": "duplicate", "message_id": message_id, "state": state}
             )
 
+    if from_me:
+        return _handle_outbound_message(
+            phone=phone,
+            text=text,
+            contact_name=contact_name,
+            message_id=message_id,
+        )
+
     logger.info("Mensagem de %s (%s): %s...", phone, contact_name, text[:50])
+
+    if HandoffService.is_active(phone):
+        expires_at = HandoffService.get_expires_at(phone)
+        logger.info(
+            "Mensagem de %s ignorada por handoff manual ativo ate %s",
+            phone,
+            expires_at.isoformat(timespec="seconds") if expires_at else "desconhecido",
+        )
+        ConversationService.add_message(phone, "patient", text)
+        if message_id:
+            _mark_message_processed(message_id, phone)
+        return JSONResponse(
+            {
+                "status": "handoff_active",
+                "phone": phone,
+                "handoff_until": (
+                    expires_at.replace(microsecond=0).isoformat() if expires_at else None
+                ),
+            }
+        )
 
     if ConversationService.reset_context_if_finished(phone):
         ConversationStateService.clear(phone)
@@ -256,9 +287,6 @@ def _extract_message_data(data: dict[str, Any] | list[Any]) -> dict[str, str] | 
 def _build_message_data(message_wrapper: dict[str, Any]) -> dict[str, str] | None:
     """Constroi o dict padrao com dados da mensagem."""
     key = message_wrapper.get("key", {})
-    if key.get("fromMe", False):
-        return None
-
     remote_jid = key.get("remoteJid", "")
     phone = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
 
@@ -276,7 +304,47 @@ def _build_message_data(message_wrapper: dict[str, Any]) -> dict[str, str] | Non
         "text": text,
         "contact_name": message_wrapper.get("pushName", ""),
         "message_id": key.get("id", ""),
+        "from_me": "1" if key.get("fromMe", False) else "0",
     }
+
+
+def _handle_outbound_message(
+    *,
+    phone: str,
+    text: str,
+    contact_name: str,
+    message_id: str,
+):
+    """Processa webhooks de mensagens enviadas pela propria instancia do WhatsApp."""
+    if OutboundMessageStore.consume_recent_match(phone, text):
+        logger.debug("Eco de mensagem automatica ignorado para %s", phone)
+        if message_id:
+            _mark_message_processed(message_id, phone)
+        return JSONResponse(
+            {
+                "status": "ignored",
+                "phone": phone,
+                "reason": "assistant_outbound_echo",
+            }
+        )
+
+    expires_at = HandoffService.activate(phone)
+    logger.info(
+        "Handoff manual ativado para %s (%s) ate %s",
+        phone,
+        contact_name,
+        expires_at.isoformat(timespec="seconds"),
+    )
+    ConversationService.add_message(phone, "doctor", text)
+    if message_id:
+        _mark_message_processed(message_id, phone)
+    return JSONResponse(
+        {
+            "status": "handoff_activated",
+            "phone": phone,
+            "handoff_until": expires_at.replace(microsecond=0).isoformat(),
+        }
+    )
 
 
 def _get_configured_api_keys(

@@ -51,6 +51,11 @@ class TestDatabase:
         )
         assert cursor.fetchone() is not None
 
+        cursor = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='outbound_messages'"
+        )
+        assert cursor.fetchone() is not None
+
         close_db()
 
         # Cleanup

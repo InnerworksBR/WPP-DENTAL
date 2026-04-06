@@ -23,6 +23,13 @@ def _build_payload(message_id: str = "msg-1") -> dict:
     }
 
 
+def _build_from_me_payload(message_id: str = "fromme-1", text: str = "Estou assumindo por aqui") -> dict:
+    payload = _build_payload(message_id)
+    payload["data"]["key"]["fromMe"] = True
+    payload["data"]["message"]["conversation"] = text
+    return payload
+
+
 class TestMainWebhook:
     """Valida autenticacao, retries e deduplicacao."""
 
@@ -589,3 +596,93 @@ class TestMainWebhook:
         assert call_count["process"] == 1
         assert call_count["create"] == 0
         assert call_count["cancel"] == 0
+
+    def test_manual_doctor_message_activates_handoff_and_blocks_agent_for_30_minutes(self, monkeypatch):
+        import src.main as main
+        from src.application.services.conversation_service import ConversationService
+
+        call_count = {"process": 0, "send": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria responder"
+
+        async def fake_send_message(self, phone, message):
+            call_count["send"] += 1
+            return True
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+
+        with TestClient(main.app) as client:
+            handoff_response = client.post(
+                "/webhook/message",
+                json=_build_from_me_payload("doctor-1", "Pode deixar que eu assumo daqui."),
+                headers={"apikey": "test-secret"},
+            )
+            patient_response = client.post(
+                "/webhook/message",
+                json=_build_payload("patient-after-handoff"),
+                headers={"apikey": "test-secret"},
+            )
+
+        assert handoff_response.status_code == 200
+        assert handoff_response.json()["status"] == "handoff_activated"
+
+        assert patient_response.status_code == 200
+        assert patient_response.json()["status"] == "handoff_active"
+        assert call_count["process"] == 0
+        assert call_count["send"] == 0
+
+        history = ConversationService.get_history("5511999999999")
+        assert history[-2]["role"] == "doctor"
+        assert history[-2]["content"] == "Pode deixar que eu assumo daqui."
+        assert history[-1]["role"] == "patient"
+        assert history[-1]["content"] == "Oi"
+
+    def test_outbound_bot_echo_does_not_activate_handoff(self, monkeypatch):
+        import src.main as main
+        from src.infrastructure.persistence import OutboundMessageStore
+
+        call_count = {"process": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Tudo certo"
+
+        async def fake_send_message(self, phone, message):
+            OutboundMessageStore.record(phone, message)
+            return True
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+
+        with TestClient(main.app) as client:
+            processed = client.post(
+                "/webhook/message",
+                json=_build_payload("bot-echo-initial"),
+                headers={"apikey": "test-secret"},
+            )
+            echo = client.post(
+                "/webhook/message",
+                json=_build_from_me_payload("bot-echo-outbound", "Tudo certo"),
+                headers={"apikey": "test-secret"},
+            )
+            follow_up = client.post(
+                "/webhook/message",
+                json=_build_payload("bot-echo-follow-up"),
+                headers={"apikey": "test-secret"},
+            )
+
+        assert processed.status_code == 200
+        assert echo.status_code == 200
+        assert echo.json()["reason"] == "assistant_outbound_echo"
+        assert follow_up.status_code == 200
+        assert follow_up.json()["status"] == "processed"
+        assert call_count["process"] == 2

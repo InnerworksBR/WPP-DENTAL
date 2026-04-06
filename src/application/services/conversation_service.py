@@ -121,6 +121,11 @@ class ConversationService:
 
         lines = []
         for msg in history:
-            prefix = "PACIENTE" if msg["role"] == "patient" else "ASSISTENTE"
+            if msg["role"] == "patient":
+                prefix = "PACIENTE"
+            elif msg["role"] == "doctor":
+                prefix = "DENTISTA"
+            else:
+                prefix = "ASSISTENTE"
             lines.append(f"{prefix}: {msg['content']}")
         return "\n".join(lines)
