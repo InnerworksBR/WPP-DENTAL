@@ -423,3 +423,88 @@ class TestConversationWorkflowService:
 
         assert "nao realizamos canal em molar" in response.lower()
         assert state.stage == "idle"
+
+    def test_plan_question_is_answered_directly_without_forcing_flow(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_state_service import ConversationStateService
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+        from src.application.services.patient_service import PatientService
+
+        init_db()
+        PatientService.upsert("5511999999999", "Cristian", "Amil Dental")
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Voces atendem Unimed?",
+            patient_name="Cristian",
+            is_first_message=False,
+        )
+        state = ConversationStateService.get("5511999999999")
+        patient = PatientService.find_by_phone("5511999999999")
+
+        normalized = response.lower()
+        assert "sim, atendemos unimed odonto" in normalized
+        assert "o que voce gostaria de fazer" not in normalized
+        assert patient is not None
+        assert patient["plan"] == "Amil Dental"
+        assert state.stage == "idle"
+
+    def test_new_patient_plan_question_is_answered_without_asking_name_first(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+
+        init_db()
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511888888888",
+            patient_message="Oi, voces atendem Unimed?",
+            patient_name="",
+            is_first_message=True,
+        )
+
+        normalized = response.lower()
+        assert "sim, atendemos unimed odonto" in normalized
+        assert "nome completo" not in normalized
+
+    def test_plan_list_question_returns_contextual_summary(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+
+        init_db()
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511777777777",
+            patient_message="Quais convenios voces atendem?",
+            patient_name="",
+            is_first_message=True,
+        )
+
+        normalized = response.lower()
+        assert "odontoprev" in normalized
+        assert "unimed odonto" in normalized
+        assert "dra. tarcilia" in normalized
+        assert "nome completo" not in normalized
+
+    def test_referral_plan_question_returns_information_without_starting_referral_flow(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_state_service import ConversationStateService
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+
+        init_db()
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511666666666",
+            patient_message="Voces atendem Caixa de Saude de Sao Vicente?",
+            patient_name="",
+            is_first_message=True,
+        )
+        state = ConversationStateService.get("5511666666666")
+
+        normalized = response.lower()
+        assert "dra. tarcilia" in normalized
+        assert "motivo da consulta" not in normalized
+        assert state.stage == "idle"

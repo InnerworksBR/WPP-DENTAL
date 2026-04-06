@@ -61,6 +61,34 @@ class ConversationWorkflowService:
             "horario",
         ),
     }
+    _PLAN_QUESTION_HINTS = (
+        "atende",
+        "atendem",
+        "aceita",
+        "aceitam",
+        "trabalha com",
+        "trabalham com",
+        "tem convenio",
+        "tem plano",
+    )
+    _PLAN_LIST_HINTS = (
+        "quais convenios",
+        "quais convenios voces atendem",
+        "quais planos",
+        "planos aceitos",
+        "planos atendidos",
+        "convenios aceitos",
+        "convenios atendidos",
+        "lista de convenios",
+        "lista de planos",
+    )
+    _PLAN_CONTEXT_HINTS = (
+        "convenio",
+        "convenios",
+        "plano",
+        "planos",
+        "odonto",
+    )
     _PERIOD_ALIASES = {
         "manha": "manha",
         "manhã": "manha",
@@ -579,6 +607,101 @@ class ConversationWorkflowService:
             "Se preferir, posso pedir para a doutora te encaminhar essa informacao."
         )
 
+    def _is_plan_list_question(self, text: str) -> bool:
+        normalized = self._normalize(text)
+        return any(self._contains_keyword(normalized, keyword) for keyword in self._PLAN_LIST_HINTS)
+
+    def _should_answer_plan_question(self, patient_message: str, explicit_plan: str) -> bool:
+        normalized = self._normalize(patient_message)
+        if not normalized:
+            return False
+
+        if self._is_plan_list_question(patient_message):
+            return True
+
+        has_question_hint = any(
+            self._contains_keyword(normalized, keyword) for keyword in self._PLAN_QUESTION_HINTS
+        )
+        has_plan_context = bool(explicit_plan) or any(
+            self._contains_keyword(normalized, keyword) for keyword in self._PLAN_CONTEXT_HINTS
+        )
+        return has_question_hint and has_plan_context
+
+    def _format_plan_question_summary(self) -> str:
+        accepted_plans: list[str] = []
+        referral_plans: list[str] = []
+        has_particular = False
+
+        for plan in self.config.get_plans():
+            name = str(plan.get("name", "")).strip()
+            if not name:
+                continue
+
+            if self._normalize(name) == "particular":
+                has_particular = True
+                continue
+
+            if plan.get("referral", False):
+                referral_to = str(plan.get("referral_to", "")).strip() or "profissional parceira"
+                referral_plans.append(f"{name} (encaminhado para {referral_to})")
+                continue
+
+            accepted_plans.append(name)
+
+        response_parts: list[str] = []
+        if accepted_plans:
+            response_parts.append(
+                "Hoje atendemos pelos convenios " + ", ".join(accepted_plans)
+            )
+        if has_particular:
+            response_parts.append("tambem atendemos no particular")
+
+        response = ". ".join(part.strip() for part in response_parts if part.strip()).strip()
+        if response:
+            response += "."
+
+        if referral_plans:
+            response += (
+                " Os convenios "
+                + ", ".join(referral_plans)
+                + " sao encaminhados para a Dra. Tarcilia."
+            )
+
+        if response:
+            response += " Se quiser, posso te orientar pelo seu plano."
+            return response
+
+        return "Posso te orientar pelo seu plano, se voce me disser qual convenio deseja consultar."
+
+    def _handle_plan_question(self, patient_message: str, explicit_plan: str) -> str:
+        if self._is_plan_list_question(patient_message):
+            return self._format_plan_question_summary()
+
+        if not explicit_plan:
+            return (
+                "Pode me dizer qual e o convenio que voce quer consultar? "
+                f"Hoje atendemos: {self._format_available_plans()}."
+            )
+
+        canonical_plan = self._canonical_plan_name(explicit_plan)
+        if self.config.is_referral_plan(canonical_plan):
+            referral_to = self.config.get_plan_referral_target(canonical_plan) or "profissional parceira"
+            return (
+                f"O convenio {canonical_plan} e atendido pela {referral_to}. "
+                "Se quiser, eu posso te orientar no encaminhamento para a equipe dela."
+            )
+
+        if self._normalize(canonical_plan) == "particular":
+            return (
+                "Sim, atendemos no particular. "
+                "Se quiser, tambem posso te ajudar com o agendamento."
+            )
+
+        return (
+            f"Sim, atendemos {canonical_plan}. "
+            "Se quiser, tambem posso te ajudar a agendar ou tirar outra duvida sobre o atendimento."
+        )
+
     def _handle_cancel_confirmation(
         self,
         phone: str,
@@ -860,9 +983,6 @@ class ConversationWorkflowService:
             state.plan_name = state.plan_name or known_patient["plan"]
 
         explicit_plan = self._extract_plan_name(patient_message)
-        if explicit_plan:
-            state.plan_name = explicit_plan
-
         if detected_procedure is not None:
             state.requested_procedure = str(detected_procedure.get("key", "")).strip()
             state.requested_reason = state.requested_reason or str(detected_procedure.get("label", "")).strip()
@@ -880,6 +1000,9 @@ class ConversationWorkflowService:
         if state.stage == "awaiting_referral_reason":
             return self._handle_referral_reason(patient_phone, state, patient_message)
 
+        if self._should_answer_plan_question(patient_message, explicit_plan):
+            return self._handle_plan_question(patient_message, explicit_plan)
+
         if not state.patient_name:
             extracted_name = self._extract_name(patient_message, patient_name)
             if extracted_name:
@@ -891,6 +1014,9 @@ class ConversationWorkflowService:
                 state.stage = "awaiting_name"
                 ConversationStateService.save(patient_phone, state)
                 return self._ask_name(bool(is_first_message))
+
+        if explicit_plan:
+            state.plan_name = explicit_plan
 
         intent = detected_intent or ("schedule" if state.requested_procedure else "") or state.intent
         if not intent:
