@@ -1,5 +1,7 @@
 """Testes das regras de agenda e sugestao de horarios."""
 
+import base64
+import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -167,4 +169,85 @@ class TestCalendarRules:
         message = str(exc_info.value)
         assert "GOOGLE_SERVICE_ACCOUNT_FILE atual: ./credentials/service-account.json" in message
         assert "/app/credentials/service-account.json" in message
+        assert "GOOGLE_SERVICE_ACCOUNT_JSON" in message
         assert "GOOGLE_SERVICE_ACCOUNT_EMAIL e GOOGLE_PRIVATE_KEY" in message
+
+    def test_get_service_accepts_service_account_json_env(self, monkeypatch):
+        service = CalendarService()
+        captured = {}
+        creds_payload = {
+            "type": "service_account",
+            "client_email": "bot@example.com",
+            "private_key": "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", json.dumps(creds_payload))
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", raising=False)
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_EMAIL", raising=False)
+        monkeypatch.delenv("GOOGLE_PRIVATE_KEY", raising=False)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.os.path.exists",
+            lambda path: False,
+        )
+
+        def fake_from_service_account_info(info, scopes):
+            captured["info"] = info
+            captured["scopes"] = scopes
+            return object()
+
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.Credentials.from_service_account_info",
+            fake_from_service_account_info,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.build",
+            lambda api_name, version, credentials: SimpleNamespace(),
+        )
+
+        result = service._get_service()
+
+        assert isinstance(result, SimpleNamespace)
+        assert captured["info"]["client_email"] == "bot@example.com"
+        assert captured["info"]["token_uri"] == "https://oauth2.googleapis.com/token"
+
+    def test_get_service_accepts_service_account_json_base64_env(self, monkeypatch):
+        service = CalendarService()
+        captured = {}
+        creds_payload = {
+            "type": "service_account",
+            "client_email": "bot@example.com",
+            "private_key": "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+        encoded_payload = base64.b64encode(json.dumps(creds_payload).encode("utf-8")).decode("utf-8")
+
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_FILE", raising=False)
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_JSON", raising=False)
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", encoded_payload)
+        monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_EMAIL", raising=False)
+        monkeypatch.delenv("GOOGLE_PRIVATE_KEY", raising=False)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.os.path.exists",
+            lambda path: False,
+        )
+
+        def fake_from_service_account_info(info, scopes):
+            captured["info"] = info
+            captured["scopes"] = scopes
+            return object()
+
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.Credentials.from_service_account_info",
+            fake_from_service_account_info,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.build",
+            lambda api_name, version, credentials: SimpleNamespace(),
+        )
+
+        result = service._get_service()
+
+        assert isinstance(result, SimpleNamespace)
+        assert captured["info"]["client_email"] == "bot@example.com"

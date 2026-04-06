@@ -1,5 +1,7 @@
 """Servico de integracao com o Google Calendar."""
 
+import base64
+import json
 import os
 import threading
 import unicodedata
@@ -54,6 +56,37 @@ class CalendarService:
                 return candidate
         return None
 
+    @staticmethod
+    def _load_credentials_from_json_env() -> dict[str, Any] | None:
+        """Carrega credenciais completas a partir de JSON ou base64 no ambiente."""
+        raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+        raw_json_base64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64", "").strip()
+
+        if raw_json_base64:
+            decoded_json = base64.b64decode(raw_json_base64).decode("utf-8")
+            return json.loads(decoded_json)
+
+        if raw_json:
+            return json.loads(raw_json)
+
+        return None
+
+    @staticmethod
+    def _load_credentials_from_minimal_env() -> dict[str, Any] | None:
+        """Carrega credenciais a partir de email e chave privada no ambiente."""
+        client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+        private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+
+        if not client_email or not private_key:
+            return None
+
+        return {
+            "type": "service_account",
+            "client_email": client_email,
+            "private_key": private_key.replace("\\n", "\n"),
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+
     def _get_service(self):
         """Inicializa o servico do Google Calendar sob demanda."""
         if self._service is None:
@@ -63,16 +96,11 @@ class CalendarService:
             if creds_file:
                 credentials = Credentials.from_service_account_file(creds_file, scopes=self.SCOPES)
             else:
-                client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
-                private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+                creds_info = self._load_credentials_from_json_env()
+                if creds_info is None:
+                    creds_info = self._load_credentials_from_minimal_env()
 
-                if client_email and private_key:
-                    creds_info = {
-                        "type": "service_account",
-                        "client_email": client_email,
-                        "private_key": private_key.replace("\\n", "\n"),
-                        "token_uri": "https://oauth2.googleapis.com/token",
-                    }
+                if creds_info is not None:
                     credentials = Credentials.from_service_account_info(creds_info, scopes=self.SCOPES)
                 else:
                     checked_paths = ", ".join(candidates)
@@ -81,7 +109,8 @@ class CalendarService:
                         f"GOOGLE_SERVICE_ACCOUNT_FILE atual: {reported_path}. "
                         f"Caminhos verificados: {checked_paths}. "
                         "Monte o arquivo no container ou configure "
-                        "GOOGLE_SERVICE_ACCOUNT_EMAIL e GOOGLE_PRIVATE_KEY."
+                        "GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICE_ACCOUNT_JSON_BASE64, "
+                        "ou GOOGLE_SERVICE_ACCOUNT_EMAIL e GOOGLE_PRIVATE_KEY."
                     )
 
             self._service = build("calendar", "v3", credentials=credentials)

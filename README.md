@@ -76,6 +76,8 @@ O projeto agora pode ser publicado direto pelo Git usando o `Dockerfile` da raiz
 - `WEBHOOK_API_KEY`
 - `GOOGLE_CALENDAR_ID`
 - `GOOGLE_SERVICE_ACCOUNT_FILE=/app/credentials/service-account.json`
+- `GOOGLE_SERVICE_ACCOUNT_JSON_BASE64` como alternativa mais pratica ao arquivo
+- `GOOGLE_SERVICE_ACCOUNT_JSON` como alternativa ao arquivo
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL` e `GOOGLE_PRIVATE_KEY` como alternativa ao arquivo
 - `DOCTOR_PHONE`
 - `DATABASE_PATH=/app/data/dental.db`
@@ -117,10 +119,12 @@ Preencha o arquivo `.env` com:
 - `DOCTOR_PHONE`
 - `DATABASE_PATH`
 
-Google Calendar pode ser configurado de duas formas:
+Google Calendar pode ser configurado destas formas:
 
 1. Arquivo JSON em `./credentials/service-account.json`
-2. Variaveis `GOOGLE_SERVICE_ACCOUNT_EMAIL` e `GOOGLE_PRIVATE_KEY`
+2. Variavel `GOOGLE_SERVICE_ACCOUNT_JSON_BASE64` com o conteudo completo do JSON em base64
+3. Variavel `GOOGLE_SERVICE_ACCOUNT_JSON` com o conteudo completo do JSON
+4. Variaveis `GOOGLE_SERVICE_ACCOUNT_EMAIL` e `GOOGLE_PRIVATE_KEY`
 
 ### 3. Subir manualmente
 
