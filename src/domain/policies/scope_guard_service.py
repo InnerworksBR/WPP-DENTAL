@@ -46,6 +46,25 @@ class ScopeGuardService:
         re.compile(r"\bindicad[oa]\b"),
         re.compile(r"\bserve\b"),
     )
+    _SUPPORTED_OPERATIONAL_PROCEDURE_TERMS = (
+        "protese",
+        "ortodontia",
+        "canal em molar",
+        "siso",
+        "extracao de siso",
+    )
+    _SUPPORTED_OPERATIONAL_CONTEXT_PATTERNS = (
+        re.compile(r"\bagend"),
+        re.compile(r"\bmarc"),
+        re.compile(r"\bconsulta\b"),
+        re.compile(r"\bconvenio\b"),
+        re.compile(r"\bplano\b"),
+        re.compile(r"\bparticular\b"),
+        re.compile(r"\bcarteir"),
+        re.compile(r"\bcobre\b"),
+        re.compile(r"\batende\b"),
+        re.compile(r"\bfaz\b"),
+    )
     _CLINICAL_PATTERNS = (
         re.compile(r"\bdor\b"),
         re.compile(r"\binchac"),
@@ -72,6 +91,11 @@ class ScopeGuardService:
         "posso te ajudar com sua consulta",
         "posso te ajudar com consultas e agendamentos",
         "apenas com agendamentos",
+        "foto da carteirinha",
+        "a doutora vai conferir e te orientar",
+        "no momento nao realizamos",
+        "atendida apenas no particular",
+        "atendemos por convenio apenas pelos planos",
     )
 
     @staticmethod
@@ -98,6 +122,13 @@ class ScopeGuardService:
                 reason="duvida_clinica",
                 summary="Paciente trouxe duvida clinica ou sintomas.",
             )
+
+        supports_operational_triage = (
+            any(term in normalized for term in cls._SUPPORTED_OPERATIONAL_PROCEDURE_TERMS)
+            and any(pattern.search(normalized) for pattern in cls._SUPPORTED_OPERATIONAL_CONTEXT_PATTERNS)
+        )
+        if supports_operational_triage:
+            return None
 
         has_procedure_term = any(term in normalized for term in cls._PROCEDURE_TERMS)
         asks_about_procedure = any(

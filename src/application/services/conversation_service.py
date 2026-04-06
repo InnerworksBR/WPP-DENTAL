@@ -27,6 +27,10 @@ class ConversationService:
         "vou encaminhar para a",
         "entrara em contato com voce em breve",
         "sera notificada e entrara em contato",
+        "vou encaminhar seu nome, telefone e motivo da consulta",
+        "a doutora vai conferir e te orientar",
+        "no momento nao realizamos",
+        "atendida apenas no particular",
     )
 
     @staticmethod

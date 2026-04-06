@@ -1,0 +1,40 @@
+rules:
+  - key: "prosthesis"
+    label: "protese"
+    keywords:
+      - "protese"
+      - "prótese"
+    allowed_plans:
+      - "OdontoPrev"
+      - "Sulamerica"
+    requires_card_photo: true
+
+  - key: "orthodontics"
+    label: "ortodontia"
+    keywords:
+      - "ortodontia"
+      - "aparelho"
+    allowed_plans:
+      - "OdontoPrev"
+      - "Sulamerica"
+    requires_card_photo: true
+
+  - key: "molar_root_canal"
+    label: "canal em molar"
+    keywords:
+      - "canal em molar"
+      - "canal no molar"
+      - "tratamento de canal em molar"
+      - "tratamento de canal no molar"
+    not_performed: true
+
+  - key: "wisdom_tooth_extraction"
+    label: "extracao de siso"
+    keywords:
+      - "extracao de siso"
+      - "extração de siso"
+      - "tirar siso"
+      - "remover siso"
+      - "siso"
+    allowed_plans:
+      - "Particular"

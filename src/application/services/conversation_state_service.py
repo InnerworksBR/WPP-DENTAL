@@ -16,6 +16,8 @@ class ConversationState:
     intent: str = ""
     patient_name: str = ""
     plan_name: str = ""
+    requested_procedure: str = ""
+    requested_reason: str = ""
     requested_period: str = ""
     requested_date: str = ""
     pending_event_id: str = ""

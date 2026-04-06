@@ -39,3 +39,19 @@ class TestScopeGuardService:
             )
             is True
         )
+
+    def test_allows_operational_triage_for_supported_procedure(self):
+        decision = ScopeGuardService.classify_patient_message(
+            "Quero agendar ortodontia pelo plano Sulamerica."
+        )
+
+        assert decision is None
+
+    def test_allows_safe_response_for_card_photo_request(self):
+        assert (
+            ScopeGuardService.response_is_safe(
+                "Para ortodontia pelo convenio Sulamerica, preciso de uma foto da carteirinha. "
+                "A doutora vai conferir e te orientar nos proximos passos."
+            )
+            is True
+        )

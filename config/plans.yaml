@@ -1,47 +1,99 @@
 plans:
-  - name: "Amil Dental"
+  - name: "OdontoPrev"
+    aliases:
+      - "Odontoprev"
+      - "Odonto Prev"
     active: true
     referral: false
-    restrictions:
-      - "clareamento"
-      - "implante"
+    restrictions: []
 
   - name: "Bradesco Dental"
+    aliases: []
     active: true
     referral: false
     restrictions: []
 
-  - name: "SulAmérica Odonto"
+  - name: "BB Dental"
+    aliases:
+      - "Banco do Brasil Dental"
     active: true
     referral: false
-    restrictions:
-      - "implante"
+    restrictions: []
+
+  - name: "Previan (Rede UNNA)"
+    aliases:
+      - "Previan"
+      - "Rede UNNA"
+      - "UNNA"
+    active: true
+    referral: false
+    restrictions: []
+
+  - name: "Unimed Odonto"
+    aliases:
+      - "Unimed"
+    active: true
+    referral: false
+    restrictions: []
+
+  - name: "Sulamerica"
+    aliases:
+      - "SulAmérica"
+      - "Sulamérica"
+      - "SulAmerica"
+      - "SulAmérica Odonto"
+      - "Sulamérica Odonto"
+    active: true
+    referral: false
+    restrictions: []
+
+  - name: "Amil Dental"
+    aliases:
+      - "Amil"
+    active: true
+    referral: false
+    restrictions: []
 
   - name: "Uniodonto"
+    aliases: []
     active: true
     referral: false
     restrictions: []
 
-  - name: "OdontoPrev"
+  - name: "MetLife"
+    aliases:
+      - "MetLife Dental"
+      - "Metlife"
     active: true
     referral: false
     restrictions: []
 
-  - name: "MetLife Dental"
+  - name: "Caixa de Saude de Sao Vicente"
+    aliases:
+      - "Caixa de Saúde de São Vicente"
+      - "Caixa de Saude Sao Vicente"
     active: true
-    referral: false
+    referral: true
+    referral_to: "Dra. Tarcilia"
+    referral_message: |
+      Esse convenio e atendido pela {referral_to}.
+      Vou encaminhar seu nome, telefone e motivo da consulta para a equipe dela, e ela deve falar com voce em breve.
+    restrictions: []
+
+  - name: "Caixa de Peculio de Sao Vicente"
+    aliases:
+      - "Caixa de Pecúlio de São Vicente"
+      - "Caixa de Peculio Sao Vicente"
+    active: true
+    referral: true
+    referral_to: "Dra. Tarcilia"
+    referral_message: |
+      Esse convenio e atendido pela {referral_to}.
+      Vou encaminhar seu nome, telefone e motivo da consulta para a equipe dela, e ela deve falar com voce em breve.
     restrictions: []
 
   - name: "Particular"
+    aliases: []
     active: true
     referral: false
     restrictions: []
-
-  # Exemplo de plano com encaminhamento:
-  # - name: "Particular Convênio X"
-  #   active: true
-  #   referral: true
-  #   referral_message: "Este convênio é atendido pela Dra. [Nome]. A doutora entrará em contato para encaminhar."
-  #   restrictions: []
-
-  # Para adicionar um novo plano, basta copiar o bloco acima e preencher.

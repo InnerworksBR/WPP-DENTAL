@@ -2,6 +2,8 @@
 
 import os
 from difflib import get_close_matches
+import re
+import unicodedata
 import yaml
 from pathlib import Path
 from typing import Any, Optional
@@ -32,6 +34,29 @@ class ConfigService:
             cls._instance = super().__new__(cls)
             cls._instance._load_configs()
         return cls._instance
+
+    @staticmethod
+    def _normalize_lookup(text: str) -> str:
+        normalized = unicodedata.normalize("NFKD", text or "")
+        normalized = normalized.encode("ascii", "ignore").decode("ascii").lower()
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def _iter_plan_candidates(self, plan: dict[str, Any]) -> list[str]:
+        candidates = [str(plan.get("name", "")).strip()]
+        aliases = plan.get("aliases", [])
+        if isinstance(aliases, list):
+            candidates.extend(str(alias).strip() for alias in aliases if str(alias).strip())
+        return [candidate for candidate in candidates if candidate]
+
+    def _resolve_plan(self, value: str) -> Optional[dict[str, Any]]:
+        target = self._normalize_lookup(value)
+        if target in {self._normalize_lookup(alias) for alias in self._PRIVATE_PLAN_ALIASES}:
+            target = "particular"
+
+        for plan in self.get_plans():
+            if any(self._normalize_lookup(candidate) == target for candidate in self._iter_plan_candidates(plan)):
+                return plan
+        return None
 
     def _resolve_env_vars(self, value: Any) -> Any:
         """Resolve variáveis de ambiente no formato ${VAR_NAME}."""
@@ -74,42 +99,40 @@ class ConfigService:
 
     def get_plan_by_name(self, name: str) -> Optional[dict[str, Any]]:
         """Busca um plano pelo nome (case-insensitive)."""
-        name_lower = name.lower().strip()
-        if name_lower in self._PRIVATE_PLAN_ALIASES:
-            name_lower = "particular"
-        for plan in self.get_plans():
-            if plan["name"].lower().strip() == name_lower:
-                return plan
-        return None
+        return self._resolve_plan(name)
 
     def find_plan_fuzzy(self, query: str) -> Optional[dict[str, Any]]:
         """Busca um plano com correspondência parcial."""
-        query_lower = query.lower().strip()
-        if query_lower in self._PRIVATE_PLAN_ALIASES:
+        query_lower = self._normalize_lookup(query)
+        private_aliases = [self._normalize_lookup(alias) for alias in self._PRIVATE_PLAN_ALIASES]
+        if query_lower in private_aliases:
             return self.get_plan_by_name("Particular")
 
         close_alias = get_close_matches(
             query_lower,
-            list(self._PRIVATE_PLAN_ALIASES),
+            private_aliases,
             n=1,
             cutoff=0.8,
         )
         if close_alias:
             return self.get_plan_by_name("Particular")
 
+        candidate_map: dict[str, dict[str, Any]] = {}
         for plan in self.get_plans():
-            plan_name_lower = plan["name"].lower()
-            if query_lower in plan_name_lower or plan_name_lower in query_lower:
-                return plan
+            for candidate in self._iter_plan_candidates(plan):
+                normalized_candidate = self._normalize_lookup(candidate)
+                candidate_map[normalized_candidate] = plan
+                if query_lower in normalized_candidate or normalized_candidate in query_lower:
+                    return plan
 
         close_match = get_close_matches(
             query_lower,
-            [plan["name"].lower().strip() for plan in self.get_plans()],
+            list(candidate_map.keys()),
             n=1,
             cutoff=0.72,
         )
         if close_match:
-            return self.get_plan_by_name(close_match[0])
+            return candidate_map[close_match[0]]
 
         return None
 
@@ -130,6 +153,44 @@ class ConfigService:
         if plan is None:
             plan = self.find_plan_fuzzy(plan_name)
         return plan.get("restrictions", []) if plan else []
+
+    def get_plan_referral_target(self, plan_name: str) -> str:
+        """Retorna o nome da profissional de encaminhamento para o plano."""
+        plan = self.get_plan_by_name(plan_name)
+        if plan is None:
+            plan = self.find_plan_fuzzy(plan_name)
+        return str(plan.get("referral_to", "")).strip() if plan else ""
+
+    def get_plan_referral_message(self, plan_name: str, **kwargs: Any) -> str:
+        """Retorna a mensagem configurada de encaminhamento para o plano."""
+        plan = self.get_plan_by_name(plan_name)
+        if plan is None:
+            plan = self.find_plan_fuzzy(plan_name)
+        if not plan:
+            return ""
+
+        template = str(plan.get("referral_message", "")).strip()
+        if not template:
+            return ""
+
+        try:
+            return template.format(**kwargs)
+        except KeyError:
+            return template
+
+    def get_procedure_rules(self) -> list[dict[str, Any]]:
+        """Retorna as regras operacionais por procedimento."""
+        rules_config = self._configs.get("procedure_rules", {})
+        all_rules = rules_config.get("rules", [])
+        return [rule for rule in all_rules if isinstance(rule, dict)]
+
+    def get_procedure_rule(self, rule_key: str) -> Optional[dict[str, Any]]:
+        """Busca uma regra operacional pelo identificador."""
+        normalized_key = self._normalize_lookup(rule_key)
+        for rule in self.get_procedure_rules():
+            if self._normalize_lookup(str(rule.get("key", ""))) == normalized_key:
+                return rule
+        return None
 
     def get_message(self, path: str, **kwargs: Any) -> str:
         """

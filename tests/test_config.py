@@ -49,6 +49,33 @@ class TestConfigService:
         assert plan is not None
         assert plan["name"] == "Particular"
 
+    def test_find_plan_by_alias(self):
+        """Aceita apelidos configurados para os convenios."""
+        from src.infrastructure.config.config_service import ConfigService
+
+        ConfigService._instance = None
+        config = ConfigService()
+
+        plan = config.find_plan_fuzzy("Rede UNNA")
+        assert plan is not None
+        assert plan["name"] == "Previan (Rede UNNA)"
+
+    def test_referral_plan_exposes_target_and_message(self):
+        """Retorna corretamente a profissional e a mensagem de encaminhamento."""
+        from src.infrastructure.config.config_service import ConfigService
+
+        ConfigService._instance = None
+        config = ConfigService()
+
+        target = config.get_plan_referral_target("Caixa de Saude de Sao Vicente")
+        message = config.get_plan_referral_message(
+            "Caixa de Saude de Sao Vicente",
+            referral_to=target,
+        )
+
+        assert target == "Dra. Tarcilia"
+        assert "Dra. Tarcilia" in message
+
     def test_get_periods(self):
         """Verifica se os períodos estão configurados corretamente."""
         from src.infrastructure.config.config_service import ConfigService

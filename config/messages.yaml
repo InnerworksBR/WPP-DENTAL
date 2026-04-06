@@ -110,6 +110,27 @@ escalation:
     Esse convenio e atendido por uma profissional parceira.
     A {doctor_name} vai te orientar sobre o encaminhamento. 🤝
 
+referral:
+  ask_reason: |
+    Entendi. Esse convenio e atendido pela {referral_to}.
+    Para eu encaminhar certinho, me diga por favor o motivo da consulta.
+
+procedure_rules:
+  card_photo_required: |
+    Para {procedure_label} pelo convenio {plan_name}, preciso de uma foto da carteirinha.
+    Pode me enviar por aqui?
+
+    A doutora vai conferir e te orientar nos proximos passos.
+  only_allowed_plans: |
+    Para {procedure_label}, atendemos por convenio apenas pelos planos {allowed_plans}.
+    Se precisar de mais alguma coisa, estou por aqui.
+  not_performed: |
+    No momento nao realizamos {procedure_label}.
+    Se precisar de outro tipo de consulta, estou por aqui.
+  only_particular: |
+    {procedure_label_capitalized} e atendida apenas no particular.
+    Se quiser seguir assim, me responda com particular que eu continuo seu atendimento.
+
 alerts:
   to_doctor: |
     Alerta do assistente virtual

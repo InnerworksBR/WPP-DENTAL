@@ -12,6 +12,7 @@ from .appointment_confirmation_service import AppointmentConfirmationService
 from .conversation_state_service import ConversationState, ConversationStateService
 from .patient_service import PatientService
 from ...infrastructure.config.config_service import ConfigService
+from ...infrastructure.integrations.alert_service import AlertService
 from ...infrastructure.integrations.calendar_service import CalendarService, SAO_PAULO_TZ
 
 
@@ -93,6 +94,22 @@ class ConversationWorkflowService:
         "manhã",
         "tarde",
         "noite",
+        "canal",
+        "molar",
+        "siso",
+        "protese",
+        "prÃ³tese",
+        "ortodontia",
+        "aparelho",
+        "odontoprev",
+        "bradesco",
+        "previan",
+        "unimed",
+        "sulamerica",
+        "sulamÃ©rica",
+        "uniodonto",
+        "metlife",
+        "caixa",
         "oi",
         "ola",
         "olá",
@@ -257,6 +274,182 @@ class ConversationWorkflowService:
         if plan:
             return str(plan["name"]).strip()
         return current_plan
+
+    def _detect_procedure_rule(self, text: str) -> dict[str, Any] | None:
+        normalized = self._normalize(text)
+        if not normalized:
+            return None
+
+        for rule in self.config.get_procedure_rules():
+            keywords = rule.get("keywords", [])
+            if any(self._contains_keyword(normalized, str(keyword)) for keyword in keywords):
+                return rule
+        return None
+
+    @staticmethod
+    def _capitalize_label(label: str) -> str:
+        cleaned = (label or "").strip()
+        return f"{cleaned[:1].upper()}{cleaned[1:]}" if cleaned else ""
+
+    def _canonical_plan_name(self, plan_name: str) -> str:
+        plan = self.config.get_plan_by_name(plan_name)
+        if plan is None:
+            plan = self.config.find_plan_fuzzy(plan_name)
+        return str(plan["name"]).strip() if plan else str(plan_name or "").strip()
+
+    def _format_allowed_plans(self, allowed_plans: list[str]) -> str:
+        rendered: list[str] = []
+        for plan_name in allowed_plans:
+            canonical = self._canonical_plan_name(plan_name)
+            if canonical and canonical not in rendered:
+                rendered.append(canonical)
+        return ", ".join(rendered)
+
+    def _plan_is_allowed(self, current_plan: str, allowed_plans: list[str]) -> bool:
+        current_canonical = self._normalize(self._canonical_plan_name(current_plan))
+        allowed_canonical = {
+            self._normalize(self._canonical_plan_name(plan_name))
+            for plan_name in allowed_plans
+            if str(plan_name).strip()
+        }
+        return bool(current_canonical) and current_canonical in allowed_canonical
+
+    @staticmethod
+    def _extract_freeform_reason(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip(" .,!?:;")).strip()
+
+    def _send_operational_alert(
+        self,
+        *,
+        phone: str,
+        patient_name: str,
+        summary: str,
+        reason: str,
+        last_message: str,
+    ) -> None:
+        try:
+            AlertService().send_alert(
+                patient_name=patient_name or "Nao informado",
+                patient_phone=phone,
+                summary=summary,
+                reason=reason,
+                last_message=last_message,
+            )
+        except Exception:
+            # O atendimento ao paciente nao deve falhar por causa do alerta interno.
+            return
+
+    def _finalize_plan_referral(
+        self,
+        phone: str,
+        state: ConversationState,
+        patient_message: str,
+    ) -> str:
+        referral_to = self.config.get_plan_referral_target(state.plan_name) or "profissional parceira"
+        reason_text = state.requested_reason or self._extract_freeform_reason(patient_message) or "Motivo nao informado"
+        summary = (
+            f"Encaminhar para {referral_to}. Convenio: {state.plan_name}. "
+            f"Motivo da consulta: {reason_text}."
+        )
+
+        self.patients.upsert(phone, state.patient_name, state.plan_name)
+        self.patients.save_interaction(phone, "referral", summary)
+        self._send_operational_alert(
+            phone=phone,
+            patient_name=state.patient_name,
+            summary=summary,
+            reason="encaminhamento",
+            last_message=patient_message,
+        )
+
+        message = self.config.get_plan_referral_message(
+            state.plan_name,
+            referral_to=referral_to,
+            patient_name=state.patient_name,
+        ).strip()
+        if not message:
+            message = (
+                f"Esse convenio e atendido pela {referral_to}. "
+                "Vou encaminhar seu nome, telefone e motivo da consulta para a equipe dela, "
+                "e ela deve falar com voce em breve."
+            )
+
+        ConversationStateService.clear(phone)
+        return message
+
+    def _handle_referral_reason(
+        self,
+        phone: str,
+        state: ConversationState,
+        patient_message: str,
+    ) -> str:
+        reason_text = self._extract_freeform_reason(patient_message)
+        if not reason_text:
+            referral_to = self.config.get_plan_referral_target(state.plan_name) or "profissional parceira"
+            return self.config.get_message(
+                "referral.ask_reason",
+                referral_to=referral_to,
+            ).strip()
+
+        state.requested_reason = reason_text
+        return self._finalize_plan_referral(phone, state, patient_message)
+
+    def _handle_procedure_rule(
+        self,
+        phone: str,
+        state: ConversationState,
+        patient_message: str,
+        rule: dict[str, Any],
+    ) -> str | None:
+        label = str(rule.get("label", "esse procedimento")).strip()
+        allowed_plans = [str(plan).strip() for plan in rule.get("allowed_plans", []) if str(plan).strip()]
+        allowed_plans_label = self._format_allowed_plans(allowed_plans)
+
+        if rule.get("not_performed", False):
+            ConversationStateService.clear(phone)
+            return self.config.get_message(
+                "procedure_rules.not_performed",
+                procedure_label=label,
+            ).strip()
+
+        if allowed_plans and not self._plan_is_allowed(state.plan_name, allowed_plans):
+            if self._plan_is_allowed("Particular", allowed_plans):
+                state.stage = "awaiting_plan"
+                state.plan_name = ""
+                ConversationStateService.save(phone, state)
+                return self.config.get_message(
+                    "procedure_rules.only_particular",
+                    procedure_label=label,
+                    procedure_label_capitalized=self._capitalize_label(label),
+                ).strip()
+
+            ConversationStateService.clear(phone)
+            return self.config.get_message(
+                "procedure_rules.only_allowed_plans",
+                procedure_label=label,
+                allowed_plans=allowed_plans_label,
+            ).strip()
+
+        if rule.get("requires_card_photo", False):
+            summary = (
+                f"Paciente deseja {label} pelo convenio {state.plan_name}. "
+                "Solicitar foto da carteirinha para conferencia."
+            )
+            self._send_operational_alert(
+                phone=phone,
+                patient_name=state.patient_name,
+                summary=summary,
+                reason="triagem_procedimento",
+                last_message=patient_message,
+            )
+            ConversationStateService.clear(phone)
+            return self.config.get_message(
+                "procedure_rules.card_photo_required",
+                procedure_label=label,
+                plan_name=state.plan_name,
+            ).strip()
+
+        return None
 
     def _ask_name(self, is_first_message: bool) -> str:
         if is_first_message:
@@ -531,6 +724,20 @@ class ConversationWorkflowService:
         patient_message: str,
         state: ConversationState,
     ) -> str:
+        detected_procedure = self._detect_procedure_rule(patient_message)
+        if detected_procedure is not None:
+            state.requested_procedure = str(detected_procedure.get("key", "")).strip()
+            state.requested_reason = state.requested_reason or str(detected_procedure.get("label", "")).strip()
+
+        active_procedure_rule = self.config.get_procedure_rule(state.requested_procedure) if state.requested_procedure else None
+        if active_procedure_rule and active_procedure_rule.get("not_performed", False):
+            return self._handle_procedure_rule(
+                phone,
+                state,
+                patient_message,
+                active_procedure_rule,
+            ) or ""
+
         if state.intent == "reschedule" and not state.reschedule_event_id:
             event = self._get_single_upcoming_event(phone)
             if event is None:
@@ -555,16 +762,28 @@ class ConversationWorkflowService:
                     ).strip()
                 return self._ask_plan(state.patient_name)
 
-            if self.config.is_referral_plan(plan_name):
-                self.patients.upsert(phone, state.patient_name, plan_name)
-                ConversationStateService.clear(phone)
-                return self.config.get_message(
-                    "escalation.referral",
-                    doctor_name=self.config.get_doctor_name(),
-                ).strip()
-
             state.plan_name = plan_name
             self.patients.upsert(phone, state.patient_name, plan_name)
+
+        if self.config.is_referral_plan(state.plan_name):
+            if not state.requested_reason:
+                state.stage = "awaiting_referral_reason"
+                ConversationStateService.save(phone, state)
+                return self.config.get_message(
+                    "referral.ask_reason",
+                    referral_to=self.config.get_plan_referral_target(state.plan_name) or "profissional parceira",
+                ).strip()
+            return self._finalize_plan_referral(phone, state, patient_message)
+
+        if active_procedure_rule:
+            procedure_response = self._handle_procedure_rule(
+                phone,
+                state,
+                patient_message,
+                active_procedure_rule,
+            )
+            if procedure_response:
+                return procedure_response
 
         requested_period = self._extract_period(patient_message) or state.requested_period
         requested_date = self._extract_date(patient_message) or state.requested_date
@@ -626,6 +845,7 @@ class ConversationWorkflowService:
         state = ConversationStateService.get(patient_phone)
         known_patient = self.patients.find_by_phone(patient_phone)
         detected_intent = self._detect_intent(patient_message)
+        detected_procedure = self._detect_procedure_rule(patient_message)
 
         if is_first_message and state.stage != "idle":
             ConversationStateService.clear(patient_phone)
@@ -639,6 +859,14 @@ class ConversationWorkflowService:
             state.patient_name = state.patient_name or known_patient["name"]
             state.plan_name = state.plan_name or known_patient["plan"]
 
+        explicit_plan = self._extract_plan_name(patient_message)
+        if explicit_plan:
+            state.plan_name = explicit_plan
+
+        if detected_procedure is not None:
+            state.requested_procedure = str(detected_procedure.get("key", "")).strip()
+            state.requested_reason = state.requested_reason or str(detected_procedure.get("label", "")).strip()
+
         if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
             return self._handle_pending_appointment_confirmation(
                 patient_phone,
@@ -649,17 +877,22 @@ class ConversationWorkflowService:
         if state.stage == "awaiting_cancel_confirmation":
             return self._handle_cancel_confirmation(patient_phone, state, patient_message)
 
+        if state.stage == "awaiting_referral_reason":
+            return self._handle_referral_reason(patient_phone, state, patient_message)
+
         if not state.patient_name:
             extracted_name = self._extract_name(patient_message, patient_name)
             if extracted_name:
                 state.patient_name = extracted_name
                 self.patients.upsert(patient_phone, extracted_name)
             else:
+                if detected_intent:
+                    state.intent = detected_intent
                 state.stage = "awaiting_name"
                 ConversationStateService.save(patient_phone, state)
                 return self._ask_name(bool(is_first_message))
 
-        intent = detected_intent or state.intent
+        intent = detected_intent or ("schedule" if state.requested_procedure else "") or state.intent
         if not intent:
             state.stage = "awaiting_intent"
             ConversationStateService.save(patient_phone, state)

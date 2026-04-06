@@ -321,3 +321,105 @@ class TestConversationWorkflowService:
         assert "benjamin constant" in response.lower()
         assert state.stage == "idle"
         assert state.intent == ""
+
+    def test_referral_plan_collects_reason_and_forwards_to_tarcilia(self, monkeypatch):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_workflow_service import AlertService, ConversationWorkflowService
+
+        init_db()
+        alerts = []
+
+        def fake_send_alert(self, **kwargs):
+            alerts.append(kwargs)
+            return True
+
+        monkeypatch.setattr(AlertService, "send_alert", fake_send_alert)
+
+        workflow = ConversationWorkflowService()
+        first_response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Quero agendar uma consulta pelo plano Caixa de Saude de Sao Vicente",
+            patient_name="Maria",
+            is_first_message=False,
+        )
+        second_response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Avaliacao de rotina",
+            patient_name="Maria",
+            is_first_message=False,
+        )
+
+        assert "motivo da consulta" in first_response.lower()
+        assert "dra. tarcilia" in second_response.lower()
+        assert alerts
+        assert "Avaliacao de rotina" in alerts[0]["summary"]
+
+    def test_orthodontics_with_allowed_plan_requests_card_photo(self, monkeypatch):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_workflow_service import AlertService, ConversationWorkflowService
+        from src.application.services.patient_service import PatientService
+
+        init_db()
+        monkeypatch.setattr(AlertService, "send_alert", lambda self, **kwargs: True)
+        PatientService.upsert("5511999999999", "Maria", "Sulamerica")
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Quero agendar ortodontia",
+            patient_name="Maria",
+            is_first_message=False,
+        )
+
+        normalized = response.lower()
+        assert "foto da carteirinha" in normalized
+        assert "sulamerica" in normalized
+
+    def test_wisdom_tooth_requires_switch_to_particular(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_state_service import ConversationStateService
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+        from src.application.services.patient_service import PatientService
+
+        init_db()
+        PatientService.upsert("5511999999999", "Maria", "Amil Dental")
+        workflow = ConversationWorkflowService()
+
+        first_response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Quero agendar extracao de siso",
+            patient_name="Maria",
+            is_first_message=False,
+        )
+        interim_state = ConversationStateService.get("5511999999999")
+        second_response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Particular",
+            patient_name="Maria",
+            is_first_message=False,
+        )
+
+        assert "apenas no particular" in first_response.lower()
+        assert interim_state.stage == "awaiting_plan"
+        assert "qual periodo" in second_response.lower()
+
+    def test_molar_root_canal_is_declined(self):
+        from src.infrastructure.persistence.connection import init_db
+        from src.application.services.conversation_state_service import ConversationStateService
+        from src.application.services.conversation_workflow_service import ConversationWorkflowService
+        from src.application.services.patient_service import PatientService
+
+        init_db()
+        PatientService.upsert("5511999999999", "Maria", "Amil Dental")
+        workflow = ConversationWorkflowService()
+
+        response = workflow.process_message(
+            patient_phone="5511999999999",
+            patient_message="Quero agendar canal em molar",
+            patient_name="Maria",
+            is_first_message=False,
+        )
+        state = ConversationStateService.get("5511999999999")
+
+        assert "nao realizamos canal em molar" in response.lower()
+        assert state.stage == "idle"
