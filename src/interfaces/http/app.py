@@ -28,11 +28,9 @@ from ...infrastructure.integrations.calendar_service import CalendarService
 from ...infrastructure.persistence import OutboundMessageStore
 from ...infrastructure.persistence.connection import close_db, get_db, init_db
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+from ...infrastructure.logging_config import setup_logging
+
+setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("wpp-dental")
 _webhook_auth_warning_logged = False
 _webhook_auth_mismatch_warning_logged = False
