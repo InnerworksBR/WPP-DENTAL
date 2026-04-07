@@ -104,7 +104,7 @@ def _build_periods_text(config: ConfigService) -> str:
     )
 
 
-def _build_system_prompt(config: ConfigService, confirmation_context: str = "") -> str:
+def _build_system_prompt(config: ConfigService, confirmation_context: str = "", patient_phone: str = "") -> str:
     doctor_name = config.get_doctor_name()
     address = config.get_doctor_address()
     min_age = config.get_min_patient_age()
@@ -120,6 +120,8 @@ def _build_system_prompt(config: ConfigService, confirmation_context: str = "") 
         f"\n## Convênios com encaminhamento (NÃO atendemos diretamente)\n{referral_plans}"
         if referral_plans else ""
     )
+
+    phone_line = f"\n- Telefone do paciente (já identificado pela API): {patient_phone}" if patient_phone else ""
 
     prompt = f"""Você é a secretária virtual da {doctor_name}, atendendo pacientes pelo WhatsApp.
 Seu nome é Melody. Seja acolhedora, simpática e objetiva — como uma secretária humana.
@@ -137,6 +139,9 @@ Para dúvidas sobre valores: diga que a {doctor_name} entrará em contato.
 - Atendimento: {working_days}
 - Idade mínima de atendimento: {min_age} anos
 
+## Dados do paciente nesta conversa{phone_line}
+- O telefone acima já é conhecido — NUNCA peça o número de telefone ao paciente.
+
 ## Convênios aceitos (atendimento direto)
 {direct_plans}{referral_section}
 
@@ -150,7 +155,7 @@ Para dúvidas sobre valores: diga que a {doctor_name} entrará em contato.
 {periods_text}
 
 ## Como usar as ferramentas
-1. Comece buscando o paciente com `buscar_paciente`
+1. Comece buscando o paciente com `buscar_paciente` usando o telefone já informado acima — NUNCA peça o número ao paciente
 2. Valide todo convênio com `verificar_convenio` antes de confirmar que atende
 3. Para agendar sem data: `buscar_proximo_dia_disponivel`; com data: `buscar_horarios_disponiveis`
 4. Ofereça no máximo 2 opções. Confirme com o paciente ANTES de `criar_agendamento`
@@ -276,7 +281,7 @@ class AgentConversationService:
         if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
             confirmation_context = _build_confirmation_context(state)
 
-        system_prompt = _build_system_prompt(self.config, confirmation_context)
+        system_prompt = _build_system_prompt(self.config, confirmation_context, patient_phone)
 
         messages: list = [SystemMessage(content=system_prompt)]
         messages.extend(_convert_history(history_text))
