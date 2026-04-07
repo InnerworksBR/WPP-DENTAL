@@ -1,4 +1,7 @@
-"""Agente ReAct com LLM nativo para atendimento dental via WhatsApp."""
+"""Agente ReAct com LLM nativo para atendimento dental via WhatsApp.
+
+Usa apenas langchain-core + langchain-openai, sem depender do pacote 'langchain'.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +9,7 @@ import logging
 import os
 from typing import Any
 
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 
@@ -27,9 +28,11 @@ from ...interfaces.tools.patient_tool import FindPatientTool, SaveInteractionToo
 
 logger = logging.getLogger(__name__)
 
+_MAX_ITERATIONS = 10
+
 
 def _wrap_tool(instance: Any) -> StructuredTool:
-    """Converte uma tool local (com _run, name, description, args_schema) em StructuredTool do LangChain."""
+    """Converte uma tool local em StructuredTool do LangChain."""
     return StructuredTool(
         name=instance.name,
         description=instance.description,
@@ -53,16 +56,13 @@ def _build_tools() -> list[StructuredTool]:
     ]
 
 
+# ── System prompt ────────────────────────────────────────────────────────────
+
 def _build_procedure_rules_text(config: ConfigService) -> str:
-    """Formata as regras de procedimentos para o system prompt."""
     rules = config.get_procedure_rules()
     if not rules:
         return ""
-
-    not_performed = []
-    private_only = []
-    card_required = []
-
+    not_performed, private_only, card_required = [], [], []
     for rule in rules:
         label = str(rule.get("label", "")).strip()
         allowed = rule.get("allowed_plans", [])
@@ -71,26 +71,19 @@ def _build_procedure_rules_text(config: ConfigService) -> str:
         elif allowed and len(allowed) == 1 and str(allowed[0]).lower() == "particular":
             private_only.append(label)
         elif rule.get("requires_card_photo", False):
-            plans_str = ", ".join(str(p) for p in allowed)
-            card_required.append(f"{label} ({plans_str})")
-
+            card_required.append(f"{label} ({', '.join(str(p) for p in allowed)})")
     parts = []
     if not_performed:
         parts.append("NÃO realizamos:\n" + "\n".join(f"- {p}" for p in not_performed))
     if private_only:
-        parts.append("Somente no particular (sem convênio):\n" + "\n".join(f"- {p}" for p in private_only))
+        parts.append("Somente no particular:\n" + "\n".join(f"- {p}" for p in private_only))
     if card_required:
-        parts.append(
-            "Exige foto da carteirinha (apenas pelos planos indicados):\n"
-            + "\n".join(f"- {p}" for p in card_required)
-        )
+        parts.append("Exige foto da carteirinha:\n" + "\n".join(f"- {p}" for p in card_required))
     return "\n\n".join(parts)
 
 
 def _build_plans_text(config: ConfigService) -> tuple[str, str]:
-    """Retorna (planos_diretos, planos_encaminhamento) formatados."""
-    direct = []
-    referral = []
+    direct, referral = [], []
     for plan in config.get_plans():
         name = str(plan.get("name", "")).strip()
         if not name:
@@ -104,13 +97,11 @@ def _build_plans_text(config: ConfigService) -> tuple[str, str]:
 
 
 def _build_periods_text(config: ConfigService) -> str:
-    periods = config.get_periods()
-    lines = []
-    period_labels = {"manhã": "Manhã", "manha": "Manhã", "tarde": "Tarde", "noite": "Noite"}
-    for key, val in periods.items():
-        label = period_labels.get(key, key.capitalize())
-        lines.append(f"- {label}: {val.get('start', '?')}–{val.get('end', '?')}")
-    return "\n".join(lines)
+    labels = {"manhã": "Manhã", "manha": "Manhã", "tarde": "Tarde", "noite": "Noite"}
+    return "\n".join(
+        f"- {labels.get(k, k.capitalize())}: {v.get('start', '?')}–{v.get('end', '?')}"
+        for k, v in config.get_periods().items()
+    )
 
 
 def _build_system_prompt(config: ConfigService, confirmation_context: str = "") -> str:
@@ -124,6 +115,11 @@ def _build_system_prompt(config: ConfigService, confirmation_context: str = "") 
     direct_plans, referral_plans = _build_plans_text(config)
     procedure_rules = _build_procedure_rules_text(config)
     periods_text = _build_periods_text(config)
+
+    referral_section = (
+        f"\n## Convênios com encaminhamento (NÃO atendemos diretamente)\n{referral_plans}"
+        if referral_plans else ""
+    )
 
     prompt = f"""Você é a secretária virtual da {doctor_name}, atendendo pacientes pelo WhatsApp.
 Seu nome é Melody. Seja acolhedora, simpática e objetiva — como uma secretária humana.
@@ -142,49 +138,40 @@ Para dúvidas sobre valores: diga que a {doctor_name} entrará em contato.
 - Idade mínima de atendimento: {min_age} anos
 
 ## Convênios aceitos (atendimento direto)
-{direct_plans}
-{"" if not referral_plans else chr(10) + "## Convênios com encaminhamento (NÃO atendemos diretamente)" + chr(10) + referral_plans}
+{direct_plans}{referral_section}
 
 ## Regras de procedimentos
 {procedure_rules}
 
 ## Regras de agendamento
 - Slots de {slot_duration} minutos, {working_days}
-- Mínimo: {min_days} dias úteis de antecedência
-- Máximo: {max_days} dias à frente
-- Períodos disponíveis:
+- Mínimo: {min_days} dias úteis de antecedência; Máximo: {max_days} dias à frente
+- Períodos:
 {periods_text}
 
 ## Como usar as ferramentas
-1. Comece buscando o paciente com `buscar_paciente` para saber se já é conhecido
-2. Quando o paciente informar um convênio, SEMPRE valide com `verificar_convenio` antes de confirmar
-3. Para agendar sem data específica: use `buscar_proximo_dia_disponivel`
-4. Para agendar com data específica: use `buscar_horarios_disponiveis`
-5. Ofereça no máximo 2 opções de horário. Confirme com o paciente ANTES de criar
-6. Só chame `criar_agendamento` depois que o paciente confirmar data e hora
-7. Após criar ou remarcar: chame `salvar_paciente` e `registrar_interacao`
-8. Para cancelar: busque com `consultar_agendamento` para obter o event_id
+1. Comece buscando o paciente com `buscar_paciente`
+2. Valide todo convênio com `verificar_convenio` antes de confirmar que atende
+3. Para agendar sem data: `buscar_proximo_dia_disponivel`; com data: `buscar_horarios_disponiveis`
+4. Ofereça no máximo 2 opções. Confirme com o paciente ANTES de `criar_agendamento`
+5. Após criar/remarcar: chame `salvar_paciente` e `registrar_interacao`
+6. Para cancelar: use `consultar_agendamento` para obter o event_id
 
 ## Regras importantes
-- Nunca confirme um convênio sem usar `verificar_convenio`
-- Se o convênio não for encontrado, informe os planos aceitos e peça para verificar o nome
-- Se o paciente for menor de {min_age} anos: informe que a clínica atende a partir de {min_age} anos
-- Para planos de encaminhamento: informe que esse convênio é atendido pela profissional parceira
-- Não repita perguntas que já foram respondidas no histórico
-""".strip()
+- Nunca confirme convênio sem usar `verificar_convenio`
+- Se convênio não encontrado: informe os planos aceitos e peça para verificar o nome
+- Paciente menor de {min_age} anos: informe que atendemos a partir de {min_age} anos
+- Planos de encaminhamento: informe que é atendido pela profissional parceira""".strip()
 
     if confirmation_context:
         prompt += f"\n\n{confirmation_context}"
-
     return prompt
 
 
 def _build_confirmation_context(state: Any) -> str:
-    """Constrói o bloco de contexto para o stage de confirmação de consulta."""
     label = state.pending_event_label or state.reschedule_event_label
     if not label or " as " not in label:
         return ""
-
     date_str, time_str = label.split(" as ", 1)
     event_id = (
         state.metadata.get(AppointmentConfirmationService.METADATA_EVENT_ID_KEY)
@@ -192,25 +179,22 @@ def _build_confirmation_context(state: Any) -> str:
         or state.reschedule_event_id
         or ""
     )
-
-    return f"""## CONTEXTO ATUAL: Confirmação de consulta pendente
+    return f"""## CONTEXTO: Confirmação de consulta pendente
 Você enviou um lembrete ao paciente sobre a consulta de AMANHÃ:
-- Data: {date_str.strip()}
-- Horário: {time_str.strip()}
-- ID do evento: {event_id}
+- Data: {date_str.strip()} | Horário: {time_str.strip()} | ID: {event_id}
 
-O paciente está respondendo a esse lembrete agora. Interprete a mensagem com esse contexto:
-- Se confirmar (sim, confirmo, vou comparecer, etc.): responda que a consulta está confirmada. NÃO crie nem cancele nada.
-- Se quiser remarcar: use `consultar_agendamento`, cancele o evento atual com `cancelar_agendamento` e agende um novo horário
-- Se quiser cancelar: confirme o cancelamento e use `cancelar_agendamento` com o ID acima
-- Se for apenas um cumprimento ou mensagem social (boa noite, etc.): responda com simpatia e pergunte se confirma a consulta de amanhã""".strip()
+Interprete a mensagem com esse contexto:
+- Confirmar (sim, vou, confirmo, etc.): responda que está confirmado. NÃO crie nem cancele nada.
+- Remarcar: cancele com `cancelar_agendamento` e agende novo horário
+- Cancelar: use `cancelar_agendamento` com o ID acima
+- Cumprimento social (boa noite, etc.): responda com simpatia e pergunte se confirma a consulta""".strip()
 
+
+# ── Conversor de histórico ───────────────────────────────────────────────────
 
 def _convert_history(history_text: str | None) -> list:
-    """Converte o histórico 'PACIENTE:/ASSISTENTE:' em mensagens LangChain."""
     if not history_text or not history_text.strip():
         return []
-
     messages = []
     for line in history_text.strip().splitlines():
         line = line.strip()
@@ -225,38 +209,58 @@ def _convert_history(history_text: str | None) -> list:
     return messages
 
 
+# ── Serviço principal ────────────────────────────────────────────────────────
+
 class AgentConversationService:
-    """Agente ReAct com LLM nativo — sem keywords, entende contexto natural."""
+    """Agente ReAct com loop de tool-calling nativo — sem keywords, entende contexto natural."""
 
     def __init__(self) -> None:
         self.config = ConfigService()
         self._tools = _build_tools()
-        self._llm = ChatOpenAI(
+        self._tool_map = {t.name: t for t in self._tools}
+
+        llm = ChatOpenAI(
             model=os.getenv("AGENT_OPENAI_MODEL", self.config.get_openai_model()),
             temperature=0,
         )
-        self._prompt_template = ChatPromptTemplate.from_messages([
-            ("system", "{system_prompt}"),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-            MessagesPlaceholder("agent_scratchpad"),
-        ])
-        self._agent = create_openai_tools_agent(
-            llm=self._llm,
-            tools=self._tools,
-            prompt=self._prompt_template,
-        )
-        self._executor = AgentExecutor(
-            agent=self._agent,
-            tools=self._tools,
-            max_iterations=10,
-            handle_parsing_errors=True,
-            verbose=bool(os.getenv("AGENT_VERBOSE", "")),
-        )
+        self._llm = llm.bind_tools(self._tools)
 
     @staticmethod
     def enabled() -> bool:
         return os.getenv("CONVERSATION_ENGINE", "").strip().lower() == "agent"
+
+    def _run_loop(self, messages: list) -> str:
+        """Executa o loop ReAct: LLM → tool calls → resultado → LLM → ... → resposta final."""
+        for iteration in range(_MAX_ITERATIONS):
+            response: AIMessage = self._llm.invoke(messages)
+
+            if not response.tool_calls:
+                return str(response.content).strip()
+
+            logger.debug(
+                "Agente — iteração %d | tools: %s",
+                iteration + 1,
+                [tc["name"] for tc in response.tool_calls],
+            )
+
+            messages.append(response)
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                tool = self._tool_map.get(tool_name)
+                if tool is None:
+                    result = f"Erro: ferramenta '{tool_name}' não encontrada."
+                else:
+                    try:
+                        result = str(tool.invoke(tool_args))
+                    except Exception as exc:
+                        result = f"Erro ao executar '{tool_name}': {exc}"
+                        logger.warning("Tool %s falhou: %s", tool_name, exc)
+
+                messages.append(ToolMessage(content=result, tool_call_id=tool_call["id"]))
+
+        logger.warning("Agente atingiu limite de %d iterações sem resposta final.", _MAX_ITERATIONS)
+        return "Desculpe, tive um problema interno. A doutora será avisada em breve."
 
     def process_message(
         self,
@@ -268,29 +272,21 @@ class AgentConversationService:
     ) -> str:
         state = ConversationStateService.get(patient_phone)
 
-        # Contexto adicional quando estamos no stage de confirmação do dia anterior
         confirmation_context = ""
         if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
             confirmation_context = _build_confirmation_context(state)
 
         system_prompt = _build_system_prompt(self.config, confirmation_context)
-        chat_history = _convert_history(history_text)
 
-        try:
-            result = self._executor.invoke({
-                "system_prompt": system_prompt,
-                "input": patient_message,
-                "chat_history": chat_history,
-            })
-            response = str(result.get("output", "")).strip()
-        except Exception as exc:
-            logger.error("Erro no agente ReAct para %s: %s", patient_phone, exc, exc_info=True)
-            raise
+        messages: list = [SystemMessage(content=system_prompt)]
+        messages.extend(_convert_history(history_text))
+        messages.append(HumanMessage(content=patient_message))
+
+        response = self._run_loop(messages)
 
         if not response:
             raise RuntimeError("Agente ReAct não produziu resposta.")
 
-        # Limpa o stage de confirmação após o agente ter respondido
         if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
             ConversationStateService.clear(patient_phone)
 
