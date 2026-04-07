@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
 
-from ..services.agent_conversation_service import AgentConversationService
 from ..services.langgraph_conversation_service import LangGraphConversationService
 from ..services.conversation_workflow_service import ConversationWorkflowService
 
@@ -15,9 +15,23 @@ class DentalCrew:
     """Delega para o engine de conversa configurado: agent > langgraph > legacy."""
 
     def __init__(self) -> None:
-        self.agent = AgentConversationService()
+        self._agent = None
         self.workflow = ConversationWorkflowService()
         self.langgraph = LangGraphConversationService()
+
+        # Inicializa o agente apenas se for o engine configurado,
+        # evitando falha de import se langchain não estiver instalado.
+        if os.getenv("CONVERSATION_ENGINE", "").strip().lower() == "agent":
+            try:
+                from ..services.agent_conversation_service import AgentConversationService
+                self._agent = AgentConversationService()
+                logger.info("AgentConversationService carregado com sucesso.")
+            except ImportError as exc:
+                logger.error(
+                    "CONVERSATION_ENGINE=agent configurado mas dependencias ausentes: %s. "
+                    "Instale os pacotes em requirements.txt e reconstrua a imagem Docker.",
+                    exc,
+                )
 
     def process_message(
         self,
@@ -30,9 +44,9 @@ class DentalCrew:
         preview = (patient_message or "")[:60].replace("\n", " ")
 
         # 1. Agente ReAct com LLM nativo (CONVERSATION_ENGINE=agent)
-        if self.agent.enabled():
+        if self._agent is not None and self._agent.enabled():
             logger.info("[ENGINE=agent] %s | mensagem: %s", patient_phone, preview)
-            result = self.agent.process_message(
+            result = self._agent.process_message(
                 patient_phone=patient_phone,
                 patient_message=patient_message,
                 patient_name=patient_name,
@@ -41,6 +55,7 @@ class DentalCrew:
             )
             logger.info("[ENGINE=agent] %s | resposta: %s", patient_phone, result[:80].replace("\n", " "))
             return result
+
 
         # 2. LangGraph router + legacy (CONVERSATION_ENGINE=langgraph)
         if self.langgraph.enabled():
