@@ -24,6 +24,11 @@ scheduling:
   min_business_days_ahead: 2
   max_days_ahead: 30
 
+# Informações da clínica
+clinic:
+  min_patient_age: 8
+  working_days: "segunda a sexta-feira"
+
 # OpenAI
 openai:
   model: "gpt-4o-mini"

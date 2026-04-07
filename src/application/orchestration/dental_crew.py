@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from ..services.agent_conversation_service import AgentConversationService
 from ..services.langgraph_conversation_service import LangGraphConversationService
 from ..services.conversation_workflow_service import ConversationWorkflowService
 
@@ -11,9 +12,10 @@ logger = logging.getLogger(__name__)
 
 
 class DentalCrew:
-    """Mantem a interface antiga, mas delega para um workflow deterministico."""
+    """Delega para o engine de conversa configurado: agent > langgraph > legacy."""
 
     def __init__(self) -> None:
+        self.agent = AgentConversationService()
         self.workflow = ConversationWorkflowService()
         self.langgraph = LangGraphConversationService()
 
@@ -25,6 +27,19 @@ class DentalCrew:
         history_text: str | None = None,
         is_first_message: bool | None = None,
     ) -> str:
+        # 1. Agente ReAct com LLM nativo (CONVERSATION_ENGINE=agent)
+        if self.agent.enabled():
+            result = self.agent.process_message(
+                patient_phone=patient_phone,
+                patient_message=patient_message,
+                patient_name=patient_name,
+                history_text=history_text,
+                is_first_message=is_first_message,
+            )
+            logger.info("Agente ReAct finalizado para %s", patient_phone)
+            return result
+
+        # 2. LangGraph router + legacy (CONVERSATION_ENGINE=langgraph)
         if self.langgraph.enabled():
             try:
                 result = self.langgraph.process_message(
@@ -34,7 +49,7 @@ class DentalCrew:
                     history_text=history_text,
                     is_first_message=is_first_message,
                 )
-                logger.info("Workflow LangGraph finalizado para %s: %s", patient_phone, result)
+                logger.info("Workflow LangGraph finalizado para %s", patient_phone)
                 return result
             except Exception:
                 if not self.langgraph.should_fallback_to_legacy():
@@ -44,6 +59,7 @@ class DentalCrew:
                     patient_phone,
                 )
 
+        # 3. Motor legado deterministico (fallback / CONVERSATION_ENGINE=legacy)
         result = self.workflow.process_message(
             patient_phone=patient_phone,
             patient_message=patient_message,
@@ -51,5 +67,5 @@ class DentalCrew:
             history_text=history_text,
             is_first_message=is_first_message,
         )
-        logger.info("Workflow finalizado para %s: %s", patient_phone, result)
+        logger.info("Workflow legado finalizado para %s", patient_phone)
         return result

@@ -334,3 +334,11 @@ class ConfigService:
     def get_openai_temperature(self) -> float:
         """Retorna a temperatura do modelo."""
         return self.get_settings().get("openai", {}).get("temperature", 0.2)
+
+    def get_min_patient_age(self) -> int:
+        """Retorna a idade mínima de atendimento configurada."""
+        return int(self.get_settings().get("clinic", {}).get("min_patient_age", 8))
+
+    def get_working_days(self) -> str:
+        """Retorna a descrição dos dias de atendimento."""
+        return str(self.get_settings().get("clinic", {}).get("working_days", "segunda a sexta-feira"))

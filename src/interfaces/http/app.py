@@ -208,7 +208,10 @@ async def receive_message(request: Request):
     if escalation_response is not None:
         return escalation_response
 
-    if current_state.stage != "awaiting_cancel_confirmation":
+    if current_state.stage not in {
+        "awaiting_cancel_confirmation",
+        AppointmentConfirmationService.CONFIRMATION_STAGE,
+    }:
         slot_selection_response = await _handle_offered_slot_selection(
             phone=phone,
             text=text,

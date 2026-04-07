@@ -24,8 +24,12 @@ rules:
     keywords:
       - "canal em molar"
       - "canal no molar"
+      - "canal de molar"
+      - "canal do molar"
       - "tratamento de canal em molar"
       - "tratamento de canal no molar"
+      - "tratamento de canal de molar"
+      - "tratamento de canal do molar"
     not_performed: true
 
   - key: "wisdom_tooth_extraction"
