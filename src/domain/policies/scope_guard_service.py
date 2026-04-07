@@ -45,6 +45,9 @@ class ScopeGuardService:
         re.compile(r"\bsobre\b"),
         re.compile(r"\bindicad[oa]\b"),
         re.compile(r"\bserve\b"),
+        re.compile(r"\batende[m]?\b"),
+        re.compile(r"\baceita[m]?\b"),
+        re.compile(r"\bconsegue[m]?\b"),
     )
     _SUPPORTED_OPERATIONAL_PROCEDURE_TERMS = (
         "protese",

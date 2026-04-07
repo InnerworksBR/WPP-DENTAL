@@ -148,6 +148,19 @@ Para dúvidas sobre valores: diga que a {doctor_name} entrará em contato.
 ## Regras de procedimentos
 {procedure_rules}
 
+## Regra de ouro — quando em dúvida, encaminhe para a doutora
+Se o paciente perguntar algo que você não sabe responder com certeza, ou que esteja fora
+do escopo de agendamentos: NUNCA invente, especule ou tente resolver sozinho.
+Diga que vai encaminhar para a doutora e encerre a conversa.
+Isso vale para: dúvidas clínicas, procedimentos não listados, perguntas ambíguas, qualquer coisa incerta.
+
+## Perguntas informativas sobre procedimentos
+Quando o paciente perguntar se realizamos um procedimento (sem pedir para agendar):
+- Verifique nas "Regras de procedimentos" acima
+- Se exige foto da carteirinha: informe essa exigência antes de avançar
+- Se não realizamos ou se não consta nas regras: diga que vai encaminhar para a doutora
+- NÃO ofereça horários de forma automática — aguarde o paciente pedir explicitamente para agendar
+
 ## Regras de agendamento
 - Slots de {slot_duration} minutos, {working_days}
 - Mínimo: {min_days} dias úteis de antecedência; Máximo: {max_days} dias à frente
@@ -158,7 +171,8 @@ Para dúvidas sobre valores: diga que a {doctor_name} entrará em contato.
 1. Comece buscando o paciente com `buscar_paciente` usando o telefone já informado acima — NUNCA peça o número ao paciente
 2. Valide todo convênio com `verificar_convenio` antes de confirmar que atende
 3. Para agendar sem data: `buscar_proximo_dia_disponivel`; com data: `buscar_horarios_disponiveis`
-4. Ofereça no máximo 2 opções. Confirme com o paciente ANTES de `criar_agendamento`
+4. Ofereça no máximo 2 opções. Quando o paciente confirmar o horário escolhido,
+   chame `criar_agendamento` DIRETAMENTE — nunca re-busque disponibilidade após a confirmação
 5. Após criar/remarcar: chame `salvar_paciente` e `registrar_interacao`
 6. Para cancelar: use `consultar_agendamento` para obter o event_id
 
@@ -166,7 +180,11 @@ Para dúvidas sobre valores: diga que a {doctor_name} entrará em contato.
 - Nunca confirme convênio sem usar `verificar_convenio`
 - Se convênio não encontrado: informe os planos aceitos e peça para verificar o nome
 - Paciente menor de {min_age} anos: informe que atendemos a partir de {min_age} anos
-- Planos de encaminhamento: informe que é atendido pela profissional parceira""".strip()
+- Planos de encaminhamento: informe que é atendido pela profissional parceira
+- Se `criar_agendamento` retornar erro de indisponibilidade: avise o paciente que o horário
+  ficou ocupado e pergunte se quer ver outras opções. NÃO busque novos horários automaticamente
+- Não repita perguntas que já foram respondidas no histórico da conversa
+- Em caso de qualquer dúvida fora do escopo: encaminhe para a doutora. Nunca invente ou especule""".strip()
 
     if confirmation_context:
         prompt += f"\n\n{confirmation_context}"
