@@ -1,9 +1,14 @@
 rules:
   - key: "prosthesis"
-    label: "protese"
+    label: "protese / coroa / faceta / ponte"
     keywords:
       - "protese"
       - "prótese"
+      - "coroa"
+      - "coroas"
+      - "faceta"
+      - "facetas"
+      - "ponte"
     allowed_plans:
       - "OdontoPrev"
       - "Sulamerica"
