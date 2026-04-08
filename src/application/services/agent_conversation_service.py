@@ -15,6 +15,7 @@ from langchain_openai import ChatOpenAI
 
 from .appointment_confirmation_service import AppointmentConfirmationService
 from .conversation_state_service import ConversationStateService
+from .conversation_workflow_service import ConversationWorkflowService
 from ...infrastructure.config.config_service import ConfigService
 from ...interfaces.tools.calendar_tool import (
     CancelAppointmentTool,
@@ -29,6 +30,13 @@ from ...interfaces.tools.patient_tool import FindPatientTool, SaveInteractionToo
 logger = logging.getLogger(__name__)
 
 _MAX_ITERATIONS = 10
+
+# Stages com lógica determinística — sempre tratados pelo motor legado, nunca pelo LLM.
+_DETERMINISTIC_STAGES: dict[str, str] = {
+    AppointmentConfirmationService.CONFIRMATION_STAGE: "_handle_pending_appointment_confirmation",
+    "awaiting_cancel_confirmation": "_handle_cancel_confirmation",
+    "awaiting_referral_reason": "_handle_referral_reason",
+}
 
 
 def _wrap_tool(instance: Any) -> StructuredTool:
@@ -104,7 +112,7 @@ def _build_periods_text(config: ConfigService) -> str:
     )
 
 
-def _build_system_prompt(config: ConfigService, confirmation_context: str = "", patient_phone: str = "") -> str:
+def _build_system_prompt(config: ConfigService, patient_phone: str = "") -> str:
     doctor_name = config.get_doctor_name()
     address = config.get_doctor_address()
     min_age = config.get_min_patient_age()
@@ -186,31 +194,7 @@ Quando o paciente perguntar se realizamos um procedimento (sem pedir para agenda
 - Não repita perguntas que já foram respondidas no histórico da conversa
 - Em caso de qualquer dúvida fora do escopo: encaminhe para a doutora. Nunca invente ou especule""".strip()
 
-    if confirmation_context:
-        prompt += f"\n\n{confirmation_context}"
     return prompt
-
-
-def _build_confirmation_context(state: Any) -> str:
-    label = state.pending_event_label or state.reschedule_event_label
-    if not label or " as " not in label:
-        return ""
-    date_str, time_str = label.split(" as ", 1)
-    event_id = (
-        state.metadata.get(AppointmentConfirmationService.METADATA_EVENT_ID_KEY)
-        or state.pending_event_id
-        or state.reschedule_event_id
-        or ""
-    )
-    return f"""## CONTEXTO: Confirmação de consulta pendente
-Você enviou um lembrete ao paciente sobre a consulta de AMANHÃ:
-- Data: {date_str.strip()} | Horário: {time_str.strip()} | ID: {event_id}
-
-Interprete a mensagem com esse contexto:
-- Confirmar (sim, vou, confirmo, etc.): responda que está confirmado. NÃO crie nem cancele nada.
-- Remarcar: cancele com `cancelar_agendamento` e agende novo horário
-- Cancelar: use `cancelar_agendamento` com o ID acima
-- Cumprimento social (boa noite, etc.): responda com simpatia e pergunte se confirma a consulta""".strip()
 
 
 # ── Conversor de histórico ───────────────────────────────────────────────────
@@ -239,6 +223,7 @@ class AgentConversationService:
 
     def __init__(self) -> None:
         self.config = ConfigService()
+        self._workflow = ConversationWorkflowService()
         self._tools = _build_tools()
         self._tool_map = {t.name: t for t in self._tools}
 
@@ -295,11 +280,16 @@ class AgentConversationService:
     ) -> str:
         state = ConversationStateService.get(patient_phone)
 
-        confirmation_context = ""
-        if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
-            confirmation_context = _build_confirmation_context(state)
+        # Stages determinísticos: delega ao motor legado, nunca ao LLM.
+        if state.stage in _DETERMINISTIC_STAGES:
+            method_name = _DETERMINISTIC_STAGES[state.stage]
+            logger.info(
+                "[ENGINE=agent] %s | stage=%s → delegando ao legacy (%s)",
+                patient_phone, state.stage, method_name,
+            )
+            return getattr(self._workflow, method_name)(patient_phone, state, patient_message)
 
-        system_prompt = _build_system_prompt(self.config, confirmation_context, patient_phone)
+        system_prompt = _build_system_prompt(self.config, patient_phone)
 
         messages: list = [SystemMessage(content=system_prompt)]
         messages.extend(_convert_history(history_text))
@@ -309,8 +299,5 @@ class AgentConversationService:
 
         if not response:
             raise RuntimeError("Agente ReAct não produziu resposta.")
-
-        if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
-            ConversationStateService.clear(patient_phone)
 
         return response
