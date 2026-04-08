@@ -29,51 +29,11 @@ class AppointmentConfirmationService:
     METADATA_TYPE_KEY = "appointment_confirmation_type"
     METADATA_EVENT_ID_KEY = "appointment_confirmation_event_id"
     METADATA_START_KEY = "appointment_confirmation_start"
-    _YES_TOKENS = (
-        "sim",
-        "confirmo",
-        "confirmada",
-        "confirmado",
-        "vou",
-        "compareco",
-        "consigo comparecer",
-        "estarei",
-        "ok",
-        "okay",
-        "fechado",
-    )
-    _NO_TOKENS = (
-        "nao",
-        "nao vou",
-        "nao consigo",
-        "nao poderei",
-        "nao posso",
-        "preciso remarcar",
-        "quero remarcar",
-        "remarcar",
-        "reagendar",
-        "trocar horario",
-        "mudar horario",
-        "outro horario",
-        "outra data",
-    )
-    _CANCEL_TOKENS = (
-        "cancelar",
-        "desmarcar",
-        "cancelar consulta",
-        "cancelar minha consulta",
-    )
 
     def __init__(self) -> None:
         self.calendar = CalendarService()
         self.whatsapp = WhatsAppService()
         self.config = ConfigService()
-
-    @staticmethod
-    def _normalize(text: str) -> str:
-        normalized = unicodedata.normalize("NFKD", text or "")
-        normalized = normalized.encode("ascii", "ignore").decode("ascii").lower()
-        return re.sub(r"\s+", " ", normalized).strip()
 
     @staticmethod
     def _normalize_datetime(value: datetime) -> datetime:
@@ -103,30 +63,6 @@ class AppointmentConfirmationService:
         if now >= next_run:
             next_run += timedelta(days=1)
         return next_run
-
-    @classmethod
-    def wants_cancellation(cls, patient_message: str) -> bool:
-        """Identifica quando o paciente quer cancelar em vez de remarcar."""
-        normalized = cls._normalize(patient_message)
-        return any(token in normalized for token in cls._CANCEL_TOKENS)
-
-    @classmethod
-    def is_affirmative_response(cls, patient_message: str) -> bool:
-        """Indica se o paciente confirmou que vai comparecer."""
-        normalized = cls._normalize(patient_message)
-        if not normalized:
-            return False
-        if cls.wants_cancellation(normalized) or any(token in normalized for token in cls._NO_TOKENS):
-            return False
-        return any(token in normalized for token in cls._YES_TOKENS)
-
-    @classmethod
-    def needs_reschedule_response(cls, patient_message: str) -> bool:
-        """Identifica respostas negativas ou pedidos diretos de remarcacao."""
-        normalized = cls._normalize(patient_message)
-        if not normalized or cls.wants_cancellation(normalized):
-            return False
-        return any(token in normalized for token in cls._NO_TOKENS)
 
     @classmethod
     def clear_confirmation_metadata(cls, state: ConversationState) -> None:

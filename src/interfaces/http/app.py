@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 
 load_dotenv()
 
-from ...application.orchestration.dental_crew import DentalCrew
+from ...application.services.clean_agent_service import CleanAgentService
 from ...application.services.appointment_confirmation_service import AppointmentConfirmationService
 from ...application.services.conversation_service import ConversationService
 from ...application.services.conversation_state_service import ConversationStateService
@@ -105,7 +105,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-dental_crew = DentalCrew()
+dental_crew = CleanAgentService()
 
 
 @app.get("/")
