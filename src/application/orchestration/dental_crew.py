@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 
+from ..services.hybrid_conversation_service import HybridConversationService
 from ..services.langgraph_conversation_service import LangGraphConversationService
 from ..services.conversation_workflow_service import ConversationWorkflowService
 
@@ -17,6 +18,7 @@ class DentalCrew:
     def __init__(self) -> None:
         self._agent = None
         self.workflow = ConversationWorkflowService()
+        self.hybrid = HybridConversationService()
         self.langgraph = LangGraphConversationService()
 
         # Inicializa o agente apenas se for o engine configurado,
@@ -57,7 +59,20 @@ class DentalCrew:
             return result
 
 
-        # 2. LangGraph router + legacy (CONVERSATION_ENGINE=langgraph)
+        # 2. Hybrid: LLM extrai contexto, legacy executa (CONVERSATION_ENGINE=hybrid)
+        if self.hybrid.enabled():
+            logger.info("[ENGINE=hybrid] %s | mensagem: %s", patient_phone, preview)
+            result = self.hybrid.process_message(
+                patient_phone=patient_phone,
+                patient_message=patient_message,
+                patient_name=patient_name,
+                history_text=history_text,
+                is_first_message=is_first_message,
+            )
+            logger.info("[ENGINE=hybrid] %s | resposta: %s", patient_phone, result[:80].replace("\n", " "))
+            return result
+
+        # 3. LangGraph router + legacy (CONVERSATION_ENGINE=langgraph)
         if self.langgraph.enabled():
             logger.info("[ENGINE=langgraph] %s | mensagem: %s", patient_phone, preview)
             try:
@@ -77,7 +92,7 @@ class DentalCrew:
                     "[ENGINE=langgraph] falha para %s; retomando legacy.", patient_phone
                 )
 
-        # 3. Motor legado deterministico (fallback / CONVERSATION_ENGINE=legacy)
+        # 4. Motor legado deterministico (fallback / CONVERSATION_ENGINE=legacy)
         logger.info("[ENGINE=legacy] %s | mensagem: %s", patient_phone, preview)
         result = self.workflow.process_message(
             patient_phone=patient_phone,
