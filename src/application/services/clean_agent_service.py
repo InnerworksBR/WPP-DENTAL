@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -35,6 +36,30 @@ from ...interfaces.tools.patient_tool import FindPatientTool, SaveInteractionToo
 logger = logging.getLogger(__name__)
 
 _MAX_ITERATIONS = 8
+_SLOT_DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
+_SLOT_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+_SLOT_TOOLS = {"buscar_horarios_disponiveis", "buscar_proximo_dia_disponivel"}
+
+
+def _parse_offered_slots(result: str) -> tuple[str, list[str]] | None:
+    date_m = _SLOT_DATE_RE.search(result)
+    times = _SLOT_TIME_RE.findall(result)
+    if not date_m or not times:
+        return None
+    return date_m.group(1), [f"{int(h):02d}:{m}" for h, m in times]
+
+
+def _is_offered_slot(datetime_str: str, state: Any) -> bool:
+    if not state.offered_date or not state.offered_times:
+        return True
+    try:
+        dt = datetime.strptime(datetime_str, "%d/%m/%Y %H:%M")
+        return (
+            dt.strftime("%d/%m/%Y") == state.offered_date
+            and dt.strftime("%H:%M") in state.offered_times
+        )
+    except ValueError:
+        return True
 
 
 def _wrap(instance: Any) -> StructuredTool:
@@ -112,7 +137,9 @@ def _build_system_prompt(config: ConfigService, patient_phone: str, confirmation
         period_lines.append(f"- {labels.get(k, k.capitalize())}: {v.get('start', '?')}–{v.get('end', '?')}")
     periods_text = "\n".join(period_lines)
 
-    today = datetime.now(SAO_PAULO_TZ).strftime("%d/%m/%Y (%A)")
+    _pt_weekdays = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
+    now = datetime.now(SAO_PAULO_TZ)
+    today = f"{now.strftime('%d/%m/%Y')} ({_pt_weekdays[now.weekday()]}) — {now.strftime('%H:%M')} (horário de Brasília)"
 
     prompt = f"""Você é a secretária virtual da {doctor_name}, atendendo via WhatsApp.
 Seja acolhedora, simpática e objetiva. Responda em português brasileiro.
@@ -148,6 +175,9 @@ NUNCA dê preços, diagnósticos ou orientações clínicas. Em caso de dúvida,
 
 ## Como usar as ferramentas
 1. `buscar_paciente` com o telefone acima logo no início — nunca peça o número
+   - Se retornar **paciente encontrado**: use o nome cadastrado em todas as operações
+   - Se retornar **paciente não encontrado**: pergunte imediatamente o nome completo do paciente antes de continuar qualquer outra etapa. Não use apelidos ou nomes abreviados — aguarde a resposta.
+   - NUNCA use o nome de exibição do WhatsApp como nome do paciente. O único nome válido é o retornado por `buscar_paciente` ou o que o próprio paciente informar nesta conversa.
 2. `verificar_convenio` SEMPRE antes de confirmar que atende um plano
 3. Antes de buscar horários, pergunte: o paciente tem data específica em mente ou prefere o primeiro disponível? E qual período prefere (manhã ou tarde)?
 4. Com data específica: `buscar_horarios_disponiveis`; sem data: `buscar_proximo_dia_disponivel`
@@ -158,9 +188,11 @@ NUNCA dê preços, diagnósticos ou orientações clínicas. Em caso de dúvida,
 
 ## Regras importantes
 - Convênio de encaminhamento: informe que é atendido pela profissional parceira, encerre
-- Se `criar_agendamento` retornar erro de indisponibilidade: avise o paciente, não re-busque automaticamente
+- Se `criar_agendamento` retornar erro de indisponibilidade: avise o paciente e pergunte se quer ver outro dia — NÃO re-busque automaticamente
 - Paciente menor de {min_age} anos: informe que atendemos a partir de {min_age} anos
-- Não repita perguntas já respondidas no histórico""".strip()
+- Não repita perguntas já respondidas no histórico
+- ESTRITAMENTE PROIBIDO oferecer qualquer horário que não tenha sido retornado por uma ferramenta nesta conversa. Se o paciente pedir um horário não listado, informe a indisponibilidade e ofereça apenas as opções retornadas pela ferramenta.
+- Após oferecer os horários disponíveis, aguarde a escolha do paciente. NÃO chame `buscar_horarios_disponiveis` nem `buscar_proximo_dia_disponivel` novamente a menos que o paciente peça explicitamente um dia diferente.""".strip()
 
     if confirmation_context:
         prompt += f"\n\n{confirmation_context}"
@@ -225,7 +257,8 @@ class CleanAgentService:
         )
         self._llm = llm.bind_tools(self._tools)
 
-    def _run_loop(self, messages: list) -> str:
+    def _run_loop(self, messages: list, patient_phone: str) -> str:
+        seen_calls: set[tuple] = set()
         for iteration in range(_MAX_ITERATIONS):
             response: AIMessage = self._llm.invoke(messages)
 
@@ -240,6 +273,28 @@ class CleanAgentService:
 
             messages.append(response)
             for call in response.tool_calls:
+                call_sig = (call["name"], str(sorted(call["args"].items())))
+                if call_sig in seen_calls:
+                    logger.warning("[clean_agent] loop detectado: %s repetido com mesmos args", call["name"])
+                    return "Desculpe, tive uma dificuldade interna. Por favor, tente novamente ou aguarde contato da clínica."
+                seen_calls.add(call_sig)
+
+                # Validação: criar_agendamento só executa com slot previamente ofertado
+                if call["name"] == "criar_agendamento":
+                    state = ConversationStateService.get(patient_phone)
+                    datetime_str = call["args"].get("datetime_str", "")
+                    if not _is_offered_slot(datetime_str, state):
+                        logger.warning(
+                            "[clean_agent] %s | tentativa de agendar horário não ofertado: %s (oferta: %s %s)",
+                            patient_phone, datetime_str, state.offered_date, state.offered_times,
+                        )
+                        result = (
+                            "Erro interno: o horário solicitado não estava entre os ofertados ao paciente. "
+                            "Use apenas os horários que foram apresentados e aguarde a escolha do paciente."
+                        )
+                        messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
+                        continue
+
                 tool = self._tool_map.get(call["name"])
                 if tool is None:
                     result = f"Erro: ferramenta '{call['name']}' não encontrada."
@@ -249,6 +304,26 @@ class CleanAgentService:
                     except Exception as exc:
                         result = f"Erro em '{call['name']}': {exc}"
                         logger.warning("[clean_agent] tool %s falhou: %s", call["name"], exc)
+
+                # Rastreamento: armazena slots ofertados para validação futura
+                if call["name"] in _SLOT_TOOLS:
+                    parsed = _parse_offered_slots(result)
+                    if parsed:
+                        state = ConversationStateService.get(patient_phone)
+                        state.offered_date, state.offered_times = parsed
+                        ConversationStateService.save(patient_phone, state)
+                        logger.debug(
+                            "[clean_agent] %s | slots ofertados salvos: %s %s",
+                            patient_phone, state.offered_date, state.offered_times,
+                        )
+
+                # Limpa oferta após agendamento confirmado
+                if call["name"] == "criar_agendamento" and "agendada com sucesso" in result:
+                    state = ConversationStateService.get(patient_phone)
+                    state.offered_date = ""
+                    state.offered_times = []
+                    ConversationStateService.save(patient_phone, state)
+
                 messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
 
         logger.warning("[clean_agent] limite de %d iterações atingido.", _MAX_ITERATIONS)
@@ -276,7 +351,7 @@ class CleanAgentService:
         messages.extend(_convert_history(history_text))
         messages.append(HumanMessage(content=patient_message))
 
-        response = self._run_loop(messages)
+        response = self._run_loop(messages, patient_phone)
 
         if not response:
             raise RuntimeError("CleanAgent não produziu resposta.")

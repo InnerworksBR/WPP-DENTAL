@@ -52,12 +52,15 @@ class GetAvailableSlotsTool:
                 "Esse dia pode ja estar preenchido ou bloqueado."
             )
 
+        config = ConfigService()
+        selected = slots[:config.get_suggestions_count()]
+
         result = f"Encontrei estes horarios disponiveis em {date} 😊"
         if period:
             result += f" ({period})"
         result += ":\n"
 
-        for index, slot in enumerate(slots, 1):
+        for index, slot in enumerate(selected, 1):
             result += f"  {index}. {slot['formatted']}\n"
 
         return result
@@ -118,7 +121,7 @@ class FindNextAvailableDayTool:
                 if slots:
                     selected = slots[:suggestions_count]
                     day_str = target.strftime("%d/%m/%Y")
-                    weekday_names = ["segunda", "terca", "quarta", "quinta", "sexta"]
+                    weekday_names = ["segunda", "terça", "quarta", "quinta", "sexta"]
                     result = (
                         f"Encontrei o proximo dia com horarios disponiveis 😊\n"
                         f"{day_str} ({weekday_names[target.weekday()]})"
@@ -154,7 +157,7 @@ class CreateAppointmentTool:
     name: str = "criar_agendamento"
     description: str = (
         "Cria uma consulta no Google Calendar da doutora. "
-        "Use esta ferramenta somente apos o paciente confirmar o horario desejado. "
+        "Use quando o paciente escolher um dos horarios oferecidos — a escolha ja e a confirmacao, nao pergunte novamente. "
         "A data e o horario devem estar no formato DD/MM/YYYY HH:MM."
     )
     args_schema: Type[BaseModel] = CreateAppointmentInput

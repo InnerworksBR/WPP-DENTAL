@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 
 from ...infrastructure.persistence.connection import get_db
 
@@ -25,6 +26,8 @@ class ConversationState:
     reschedule_event_id: str = ""
     reschedule_event_label: str = ""
     metadata: dict[str, str] = field(default_factory=dict)
+    offered_date: str = ""
+    offered_times: list[str] = field(default_factory=list)
 
 
 class ConversationStateService:
@@ -66,6 +69,21 @@ class ConversationStateService:
             (phone, json.dumps(asdict(state), ensure_ascii=True)),
         )
         db.commit()
+
+    @staticmethod
+    def get_updated_at(phone: str) -> datetime | None:
+        """Retorna quando o estado foi atualizado pela última vez (UTC)."""
+        db = get_db()
+        row = db.execute(
+            "SELECT updated_at FROM conversation_state WHERE phone = ?",
+            (phone,),
+        ).fetchone()
+        if row is None or not row["updated_at"]:
+            return None
+        try:
+            return datetime.strptime(str(row["updated_at"]), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
 
     @staticmethod
     def clear(phone: str) -> None:

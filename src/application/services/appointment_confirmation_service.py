@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import unicodedata
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 from .conversation_service import ConversationService
@@ -281,8 +281,26 @@ class AppointmentConfirmationService:
 
             current_state = ConversationStateService.get(phone)
             if current_state.stage != "idle":
-                stats["skipped_busy"] += 1
-                continue
+                # Só pula se o estado for recente (< 2h) — estado antigo é considerado expirado
+                updated_at = ConversationStateService.get_updated_at(phone)
+                state_is_recent = (
+                    updated_at is not None
+                    and (datetime.utcnow() - updated_at).total_seconds() < 7200
+                )
+                if state_is_recent:
+                    logger.info(
+                        "[confirmacao] %s | pulado (stage=%s, atualizado há %.0f min)",
+                        phone,
+                        current_state.stage,
+                        (datetime.utcnow() - updated_at).total_seconds() / 60,
+                    )
+                    stats["skipped_busy"] += 1
+                    continue
+                logger.info(
+                    "[confirmacao] %s | estado expirado (stage=%s) — enviando mesmo assim",
+                    phone, current_state.stage,
+                )
+                ConversationStateService.clear(phone)
 
             patient = PatientService.find_by_phone(phone) or {}
             patient_name = str(

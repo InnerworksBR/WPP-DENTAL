@@ -254,18 +254,26 @@ class CalendarService:
         start_of_day = datetime.combine(date_sp.date(), time_min or time(0, 0)).replace(tzinfo=SAO_PAULO_TZ)
         end_of_day = datetime.combine(date_sp.date(), time_max or time(23, 59, 59)).replace(tzinfo=SAO_PAULO_TZ)
 
-        events_result = (
-            service.events()
-            .list(
-                calendarId=self.calendar_id,
-                timeMin=start_of_day.isoformat(),
-                timeMax=end_of_day.isoformat(),
-                singleEvents=True,
-                orderBy="startTime",
+        all_items: list[dict] = []
+        page_token: str | None = None
+        while True:
+            events_result = (
+                service.events()
+                .list(
+                    calendarId=self.calendar_id,
+                    timeMin=start_of_day.isoformat(),
+                    timeMax=end_of_day.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                    pageToken=page_token,
+                )
+                .execute()
             )
-            .execute()
-        )
-        return events_result.get("items", [])
+            all_items.extend(events_result.get("items", []))
+            page_token = events_result.get("nextPageToken")
+            if not page_token:
+                break
+        return all_items
 
     def get_available_slots(self, date: datetime, period: Optional[str] = None) -> list[dict]:
         """Retorna slots disponiveis em um dia e periodo."""

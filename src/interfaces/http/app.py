@@ -404,11 +404,9 @@ def _get_patient_escalation_message() -> str:
 
 def _build_patient_name(phone: str, contact_name: str) -> str:
     """Resolve o nome mais confiavel disponivel para o paciente."""
-    patient_name = PatientService.resolve_name(phone, contact_name)
+    patient_name = PatientService.resolve_name(phone)
     if patient_name:
         return patient_name
-    if contact_name:
-        return contact_name.strip()
     return normalize_internal_phone(phone)
 
 
