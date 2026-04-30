@@ -88,7 +88,7 @@ def _build_tools() -> list[StructuredTool]:
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
-def _build_system_prompt(config: ConfigService, patient_phone: str) -> str:
+def _build_system_prompt(config: ConfigService, patient_phone: str, greeting_template: str = "") -> str:
     doctor_name = config.get_doctor_name()
     address = config.get_doctor_address()
     working_days = config.get_working_days()
@@ -194,7 +194,15 @@ NUNCA dê preços, diagnósticos ou orientações clínicas. Em caso de dúvida,
 - ESTRITAMENTE PROIBIDO oferecer qualquer horário que não tenha sido retornado por uma ferramenta nesta conversa. Se o paciente pedir um horário não listado, informe a indisponibilidade e ofereça apenas as opções retornadas pela ferramenta.
 - Após oferecer os horários disponíveis, aguarde a escolha do paciente. NÃO chame `buscar_horarios_disponiveis` nem `buscar_proximo_dia_disponivel` novamente a menos que o paciente peça explicitamente um dia diferente.""".strip()
 
-    return prompt
+    if greeting_template:
+        prompt += f"""
+
+## Saudação Obrigatória (Início da Conversa)
+Se esta for a primeira interação com o paciente agora (histórico vazio ou reiniciado), você DEVE iniciar sua resposta com exatamente este texto:
+{greeting_template}
+Adapte o restante da resposta para fluir naturalmente após essa saudação se o paciente já tiver feito uma pergunta específica."""
+
+    return prompt.strip()
 
 
 def _convert_history(history_text: str | None) -> list:
@@ -310,8 +318,16 @@ class CleanAgentService:
         is_first_message: bool | None = None,
     ) -> str:
         state = ConversationStateService.get(patient_phone)
+        
+        greeting_template = ""
+        if is_first_message or not history_text or "Nenhum historico" in history_text:
+            patient = PatientService.find_by_phone(patient_phone)
+            if patient:
+                greeting_template = self.config.get_message("greeting.returning_patient", patient_name=patient["name"])
+            else:
+                greeting_template = self.config.get_message("greeting.new_patient", doctor_name=self.config.get_doctor_name())
 
-        system_prompt = _build_system_prompt(self.config, patient_phone)
+        system_prompt = _build_system_prompt(self.config, patient_phone, greeting_template)
 
         messages: list = [SystemMessage(content=system_prompt)]
         messages.extend(_convert_history(history_text))
