@@ -192,7 +192,8 @@ NUNCA dê preços, diagnósticos ou orientações clínicas. Em caso de dúvida,
 - Paciente menor de {min_age} anos: informe que atendemos a partir de {min_age} anos
 - Não repita perguntas já respondidas no histórico
 - ESTRITAMENTE PROIBIDO oferecer qualquer horário que não tenha sido retornado por uma ferramenta nesta conversa. Se o paciente pedir um horário não listado, informe a indisponibilidade e ofereça apenas as opções retornadas pela ferramenta.
-- Após oferecer os horários disponíveis, aguarde a escolha do paciente. NÃO chame `buscar_horarios_disponiveis` nem `buscar_proximo_dia_disponivel` novamente a menos que o paciente peça explicitamente um dia diferente.""".strip()
+- Após oferecer os horários disponíveis, aguarde a escolha do paciente. NÃO chame `buscar_horarios_disponiveis` nem `buscar_proximo_dia_disponivel` novamente a menos que o paciente peça explicitamente um dia diferente.
+- NUNCA diga frases como "Um momento", "Aguarde", "Um segundo" ou "Vou processar". Se precisar usar uma ferramenta, chame-a imediatamente sem dar satisfação prévia. O paciente só deve ver o resultado final da operação.""".strip()
 
     if greeting_template:
         prompt += f"""
@@ -322,8 +323,17 @@ class CleanAgentService:
         greeting_template = ""
         if is_first_message or not history_text or "Nenhum historico" in history_text:
             patient = PatientService.find_by_phone(patient_phone)
+            
+            # Melhora a resolução do nome para evitar "Paciente" genérico
+            name_to_use = ""
+            if patient and patient.get("name") and patient["name"].lower() != "paciente":
+                name_to_use = patient["name"]
+            else:
+                # Se não tem nome no banco ou é genérico, usa o nome do WhatsApp (pushName)
+                name_to_use = patient_name or "Paciente"
+
             if patient:
-                greeting_template = self.config.get_message("greeting.returning_patient", patient_name=patient["name"])
+                greeting_template = self.config.get_message("greeting.returning_patient", patient_name=name_to_use)
             else:
                 greeting_template = self.config.get_message("greeting.new_patient", doctor_name=self.config.get_doctor_name())
 
