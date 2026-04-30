@@ -88,7 +88,7 @@ def _build_tools() -> list[StructuredTool]:
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
-def _build_system_prompt(config: ConfigService, patient_phone: str, confirmation_context: str = "") -> str:
+def _build_system_prompt(config: ConfigService, patient_phone: str) -> str:
     doctor_name = config.get_doctor_name()
     address = config.get_doctor_address()
     working_days = config.get_working_days()
@@ -194,35 +194,7 @@ NUNCA dê preços, diagnósticos ou orientações clínicas. Em caso de dúvida,
 - ESTRITAMENTE PROIBIDO oferecer qualquer horário que não tenha sido retornado por uma ferramenta nesta conversa. Se o paciente pedir um horário não listado, informe a indisponibilidade e ofereça apenas as opções retornadas pela ferramenta.
 - Após oferecer os horários disponíveis, aguarde a escolha do paciente. NÃO chame `buscar_horarios_disponiveis` nem `buscar_proximo_dia_disponivel` novamente a menos que o paciente peça explicitamente um dia diferente.""".strip()
 
-    if confirmation_context:
-        prompt += f"\n\n{confirmation_context}"
-
     return prompt
-
-
-def _build_confirmation_context(state: Any) -> str:
-    """Injeta contexto determinístico quando o paciente responde ao lembrete de cron."""
-    label = str(state.pending_event_label or state.reschedule_event_label or "").strip()
-    if not label or " as " not in label:
-        return ""
-
-    date_str, time_str = label.split(" as ", 1)
-    event_id = (
-        state.metadata.get(AppointmentConfirmationService.METADATA_EVENT_ID_KEY, "")
-        or state.pending_event_id
-        or state.reschedule_event_id
-        or ""
-    )
-
-    return f"""## CONTEXTO ATIVO — Confirmação de consulta
-O paciente está respondendo ao lembrete da consulta de AMANHÃ:
-Data: {date_str.strip()} | Horário: {time_str.strip()} | ID: {event_id}
-
-AÇÃO OBRIGATÓRIA — escolha exatamente uma:
-- Paciente CONFIRMA (sim, vou, ok, estarei lá...): responda que está confirmado. NÃO chame nenhuma ferramenta.
-- Paciente CANCELA (não, não posso, cancelar...): chame `cancelar_agendamento` com o ID acima. Após cancelar, pergunte se quer reagendar outro dia.
-- Paciente quer REMARCAR (remarcar, reagendar, outro horário...): chame `cancelar_agendamento` com o ID acima, depois busque novos horários.
-- Outra mensagem: responda com simpatia e pergunte se confirma, cancela ou quer remarcar.""".strip()
 
 
 def _convert_history(history_text: str | None) -> list:
@@ -339,13 +311,7 @@ class CleanAgentService:
     ) -> str:
         state = ConversationStateService.get(patient_phone)
 
-        # Injeta contexto de confirmação de cron quando aplicável
-        confirmation_context = ""
-        if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
-            confirmation_context = _build_confirmation_context(state)
-            logger.info("[clean_agent] %s | stage=confirmation → contexto injetado", patient_phone)
-
-        system_prompt = _build_system_prompt(self.config, patient_phone, confirmation_context)
+        system_prompt = _build_system_prompt(self.config, patient_phone)
 
         messages: list = [SystemMessage(content=system_prompt)]
         messages.extend(_convert_history(history_text))
@@ -355,10 +321,5 @@ class CleanAgentService:
 
         if not response:
             raise RuntimeError("CleanAgent não produziu resposta.")
-
-        # Limpa estado de confirmação após o agente ter respondido
-        if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
-            ConversationStateService.clear(patient_phone)
-            logger.info("[clean_agent] %s | estado de confirmação limpo", patient_phone)
 
         return response

@@ -25,11 +25,11 @@ class AppointmentConfirmationRequest:
 class AppointmentOfferService:
     """Resolve respostas curtas do paciente para horarios ja ofertados."""
 
-    _DATE_PATTERN = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
+    _DATE_PATTERN = re.compile(r"\b(\d{2}/\d{2}(?:/\d{4})?)\b")
     _TIME_PATTERN = re.compile(r"\b(\d{1,2}):(\d{2})\b")
     _HOUR_ONLY_PATTERN = re.compile(r"(?:\bas\b|\ba?s?\b|\b)\s*(\d{1,2})(?:h\b| horas?\b)?")
-    _FIRST_OPTION_PATTERN = re.compile(r"\b(primeira|primeiro|1a|1o|opcao 1|opcao numero 1)\b")
-    _SECOND_OPTION_PATTERN = re.compile(r"\b(segunda|segundo|2a|2o|opcao 2|opcao numero 2)\b")
+    _FIRST_OPTION_PATTERN = re.compile(r"\b(primeira|primeiro|1a|1o|opcao 1|opcao numero 1|1)\b")
+    _SECOND_OPTION_PATTERN = re.compile(r"\b(segunda|segundo|2a|2o|opcao 2|opcao numero 2|2)\b")
     _CONFIRMATION_MARKERS = (
         "posso confirmar sua consulta",
         "posso confirmar a sua consulta",
@@ -46,6 +46,8 @@ class AppointmentOfferService:
         "qual voce prefere",
         "qual horario prefere",
         "qual prefere",
+        "qual horario voce prefere",
+        "qual a sua preferencia",
     )
     _AFFIRMATIVE_CONFIRMATION_TOKENS = (
         "sim",
@@ -103,6 +105,10 @@ class AppointmentOfferService:
             if not date_match or len(time_matches) < 1:
                 continue
 
+            date_str = date_match.group(1)
+            if len(date_str) == 5:
+                date_str = f"{date_str}/{datetime.now().year}"
+
             times = []
             for hour, minute in time_matches:
                 formatted = f"{int(hour):02d}:{minute}"
@@ -110,7 +116,7 @@ class AppointmentOfferService:
                     times.append(formatted)
 
             if times:
-                return AppointmentOffer(date_str=date_match.group(1), times=times)
+                return AppointmentOffer(date_str=date_str, times=times)
 
         return None
 
@@ -133,9 +139,13 @@ class AppointmentOfferService:
             if not date_match or not time_matches:
                 continue
 
+            date_str = date_match.group(1)
+            if len(date_str) == 5:
+                date_str = f"{date_str}/{datetime.now().year}"
+
             hour, minute = time_matches[0]
             return AppointmentConfirmationRequest(
-                date_str=date_match.group(1),
+                date_str=date_str,
                 time_str=f"{int(hour):02d}:{minute}",
             )
 

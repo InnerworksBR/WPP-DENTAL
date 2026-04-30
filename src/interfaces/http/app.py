@@ -206,6 +206,16 @@ async def receive_message(request: Request):
     if escalation_response is not None:
         return escalation_response
 
+    if current_state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
+        confirmation_response = await _handle_appointment_confirmation(
+            phone=phone,
+            text=text,
+            contact_name=contact_name,
+            message_id=message_id,
+        )
+        if confirmation_response is not None:
+            return confirmation_response
+
     if current_state.stage not in {
         "awaiting_cancel_confirmation",
         AppointmentConfirmationService.CONFIRMATION_STAGE,
@@ -248,6 +258,17 @@ async def receive_message(request: Request):
             text=text,
             contact_name=contact_name,
         )
+
+    normalized_resp = unicodedata.normalize("NFKD", response_text or "").encode("ascii", "ignore").decode("ascii").lower()
+    if any(marker in normalized_resp for marker in [
+        "vou encaminhar para",
+        "entrara em contato",
+        "sera notificada",
+        "vou encaminhar",
+        "vai conferir e te orientar",
+    ]):
+        HandoffService.activate(phone)
+        logger.info("Handoff ativado automaticamente apos resposta da IA para %s", phone)
 
     delivered = await _send_response(phone, response_text)
     if not delivered:
@@ -616,6 +637,64 @@ async def _handle_offered_slot_selection(
             "selected_time": selected_time,
         }
     )
+
+
+async def _handle_appointment_confirmation(
+    phone: str,
+    text: str,
+    contact_name: str,
+    message_id: str,
+):
+    """Resolve respostas a pedidos de confirmacao de consulta (cron) nativamente."""
+    state = ConversationStateService.get(phone)
+    event_id = state.metadata.get(AppointmentConfirmationService.METADATA_EVENT_ID_KEY) or state.pending_event_id
+
+    normalized = AppointmentOfferService._normalize(text)
+    
+    if any(token in normalized for token in ("remarcar", "reagendar", "mudar", "outro horario")):
+        if event_id:
+            CalendarService().cancel_appointment(event_id)
+        
+        response_text = "Certo, cancelei a consulta atual. Para qual dia e periodo voce gostaria de remarcar?"
+        ConversationStateService.clear(phone)
+        
+        delivered = await _send_response(phone, response_text)
+        if message_id:
+            _mark_message_processed(message_id, phone)
+            
+        ConversationService.add_message(phone, "patient", text)
+        ConversationService.add_message(phone, "assistant", response_text)
+        return JSONResponse({"status": "reschedule_requested", "phone": phone})
+
+    if AppointmentOfferService.is_affirmative_confirmation(text):
+        response_text = "Perfeito! Sua consulta esta confirmada. Nos vemos la! 😊"
+        ConversationStateService.clear(phone)
+        
+        delivered = await _send_response(phone, response_text)
+        if message_id:
+            _mark_message_processed(message_id, phone)
+            
+        ConversationService.add_message(phone, "patient", text)
+        ConversationService.add_message(phone, "assistant", response_text)
+        return JSONResponse({"status": "appointment_confirmed", "phone": phone})
+        
+    if any(token in normalized for token in ("nao", "cancelar", "nao vou", "desmarcar")):
+        if event_id:
+            CalendarService().cancel_appointment(event_id)
+            
+        response_text = "Consulta cancelada com sucesso. Se precisar agendar novamente, estou a disposicao!"
+        ConversationStateService.clear(phone)
+        
+        delivered = await _send_response(phone, response_text)
+        if message_id:
+            _mark_message_processed(message_id, phone)
+            
+        ConversationService.add_message(phone, "patient", text)
+        ConversationService.add_message(phone, "assistant", response_text)
+        return JSONResponse({"status": "appointment_cancelled", "phone": phone})
+
+    return None
+
 
 
 async def _send_scope_alert(
