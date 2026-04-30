@@ -97,6 +97,21 @@ plans:
       Vou encaminhar seu nome, telefone e motivo da consulta para a equipe dela, e ela deve falar com voce em breve.
     restrictions: []
 
+  - name: "Dentalpar"
+    aliases:
+      - "Dental Par"
+    active: true
+    referral: false
+    restrictions: []
+
+  - name: "Transmontano"
+    aliases:
+      - "Transmontano Saúde"
+      - "Transmontano Odonto"
+    active: true
+    referral: false
+    restrictions: []
+
   - name: "Particular"
     aliases: []
     active: true
