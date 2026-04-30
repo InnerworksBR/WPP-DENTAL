@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import logging
 import os
+import unicodedata
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from typing import Any
