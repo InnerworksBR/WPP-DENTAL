@@ -523,6 +523,11 @@ async def _handle_offered_slot_selection(
     """Resolve escolhas objetivas de horarios ja ofertados sem depender do LLM."""
     history = ConversationService.get_history(phone, limit=6)
     patient_name = _build_patient_name(phone, contact_name)
+    
+    # Se nao tivermos certeza do nome (fallback para o telefone), repassamos para o LLM
+    if not patient_name or patient_name == normalize_internal_phone(phone) or patient_name.replace("+", "").isdigit():
+        return None
+
     calendar = CalendarService()
 
     pending_confirmation = AppointmentOfferService.extract_latest_confirmation_request(history)
