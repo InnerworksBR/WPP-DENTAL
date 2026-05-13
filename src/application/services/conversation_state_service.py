@@ -28,6 +28,8 @@ class ConversationState:
     metadata: dict[str, str] = field(default_factory=dict)
     offered_date: str = ""
     offered_times: list[str] = field(default_factory=list)
+    pending_slot_date: str = ""
+    pending_slot_time: str = ""
 
 
 class ConversationStateService:

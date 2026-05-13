@@ -407,6 +407,9 @@ class CalendarService:
         start_sp = self._normalize_datetime(start_time)
         end_sp = start_sp + timedelta(minutes=slot_duration)
         now_sp = datetime.now(SAO_PAULO_TZ)
+        clean_name = (patient_name or "").strip()
+        if not clean_name or clean_name.lower() == "paciente" or clean_name.replace("+", "").isdigit():
+            raise ValueError("Informe o nome completo do paciente antes de agendar.")
 
         if start_sp <= now_sp:
             raise ValueError("O horario informado ja esta no passado.")

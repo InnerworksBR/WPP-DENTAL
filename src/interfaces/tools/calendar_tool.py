@@ -1,5 +1,7 @@
 """Tool CrewAI para operacoes com o Google Calendar."""
 
+import re
+import unicodedata
 from datetime import datetime, timedelta
 from typing import Optional, Type
 
@@ -10,10 +12,64 @@ from ...infrastructure.config.config_service import ConfigService
 from ...infrastructure.integrations.calendar_service import CalendarService, SAO_PAULO_TZ
 
 
+_WEEKDAY_NAMES = [
+    "segunda-feira",
+    "terca-feira",
+    "quarta-feira",
+    "quinta-feira",
+    "sexta-feira",
+    "sabado",
+    "domingo",
+]
+_WEEKDAY_LOOKUP = {
+    "segunda": 0,
+    "segunda feira": 0,
+    "terca": 1,
+    "terca feira": 1,
+    "terça": 1,
+    "terça feira": 1,
+    "quarta": 2,
+    "quarta feira": 2,
+    "quinta": 3,
+    "quinta feira": 3,
+    "sexta": 4,
+    "sexta feira": 4,
+}
+
+
+def _normalize_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text or "")
+    normalized = normalized.encode("ascii", "ignore").decode("ascii").lower()
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _resolve_date_input(date: str) -> datetime:
+    """Aceita DD/MM/YYYY ou um dia da semana e devolve a proxima data real."""
+    try:
+        return datetime.strptime(date, "%d/%m/%Y")
+    except ValueError:
+        pass
+
+    target_weekday = _WEEKDAY_LOOKUP.get(_normalize_text(date))
+    if target_weekday is None:
+        raise ValueError("Data invalida. Use DD/MM/YYYY ou um dia da semana.")
+
+    today = datetime.now(SAO_PAULO_TZ)
+    days_ahead = (target_weekday - today.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    target = today + timedelta(days=days_ahead)
+    return target.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _date_label(dt: datetime) -> str:
+    return f"{_WEEKDAY_NAMES[dt.weekday()]}, {dt.strftime('%d/%m/%Y')}"
+
+
 class GetAvailableSlotsInput(BaseModel):
     """Input para buscar horarios disponiveis."""
 
-    date: str = Field(..., description="Data no formato DD/MM/YYYY")
+    date: str = Field(..., description="Data no formato DD/MM/YYYY ou dia da semana, como 'quinta'")
     period: Optional[str] = Field(
         None,
         description="Periodo do dia: 'manha', 'tarde' ou 'noite'. Se nao informado, retorna o dia inteiro.",
@@ -27,20 +83,22 @@ class GetAvailableSlotsTool:
     description: str = (
         "Busca horarios disponiveis para agendamento no Google Calendar. "
         "Retorna slots de 15 minutos que estao livres. "
-        "A data deve estar no formato DD/MM/YYYY. "
+        "A data deve estar no formato DD/MM/YYYY ou pode ser um dia da semana. "
         "O periodo pode ser 'manha', 'tarde' ou 'noite'."
     )
     args_schema: Type[BaseModel] = GetAvailableSlotsInput
 
     def _run(self, date: str, period: Optional[str] = None) -> str:
         try:
-            dt = datetime.strptime(date, "%d/%m/%Y")
-        except ValueError:
-            return "Erro: Data invalida. Use o formato DD/MM/YYYY."
+            dt = _resolve_date_input(date)
+        except ValueError as exc:
+            return f"Erro: {exc}"
 
         if dt.weekday() >= 5:
-            day_name = "sabado" if dt.weekday() == 5 else "domingo"
-            return f"Erro: {date} e {day_name}. A clinica nao atende aos finais de semana."
+            return (
+                f"Erro: {_date_label(dt)} nao tem atendimento. "
+                "A clinica nao atende aos finais de semana."
+            )
 
         service = CalendarService()
         slots = service.get_available_slots(dt, period)
@@ -48,14 +106,14 @@ class GetAvailableSlotsTool:
         if not slots:
             suffix = f" no periodo da {period}" if period else ""
             return (
-                f"Nao encontrei horarios disponiveis em {date}{suffix} 😕\n"
+                f"Nao encontrei horarios disponiveis em {_date_label(dt)}{suffix}.\n"
                 "Esse dia pode ja estar preenchido ou bloqueado."
             )
 
         config = ConfigService()
         selected = slots[:config.get_suggestions_count()]
 
-        result = f"Encontrei estes horarios disponiveis em {date} 😊"
+        result = f"Encontrei estes horarios disponiveis em {_date_label(dt)}"
         if period:
             result += f" ({period})"
         result += ":\n"
@@ -120,11 +178,9 @@ class FindNextAvailableDayTool:
 
                 if slots:
                     selected = slots[:suggestions_count]
-                    day_str = target.strftime("%d/%m/%Y")
-                    weekday_names = ["segunda", "terça", "quarta", "quinta", "sexta"]
                     result = (
-                        f"Encontrei o proximo dia com horarios disponiveis 😊\n"
-                        f"{day_str} ({weekday_names[target.weekday()]})"
+                        "Encontrei o proximo dia com horarios disponiveis\n"
+                        f"{_date_label(target)}"
                     )
                     if period:
                         result += f" - periodo da {period}"
@@ -157,7 +213,7 @@ class CreateAppointmentTool:
     name: str = "criar_agendamento"
     description: str = (
         "Cria uma consulta no Google Calendar da doutora. "
-        "Use quando o paciente escolher um dos horarios oferecidos — a escolha ja e a confirmacao, nao pergunte novamente. "
+        "Use quando o paciente escolher um dos horarios oferecidos - a escolha ja e a confirmacao, nao pergunte novamente. "
         "A data e o horario devem estar no formato DD/MM/YYYY HH:MM."
     )
     args_schema: Type[BaseModel] = CreateAppointmentInput
@@ -175,7 +231,7 @@ class CreateAppointmentTool:
             return f"Erro: {exc}"
 
         return (
-            "Perfeito! 😊\n"
+            "Perfeito!\n"
             "Consulta agendada com sucesso.\n"
             f"ID do evento: {event.get('id', 'N/A')}\n"
             f"Data: {dt.strftime('%d/%m/%Y')}\n"
@@ -252,7 +308,7 @@ class CancelAppointmentTool:
         success = service.cancel_appointment(current_event_id)
         if success:
             return (
-                "Prontinho! 😊\n"
+                "Prontinho!\n"
                 "Consulta cancelada com sucesso.\n"
                 f"Data: {date_str}\n"
                 f"Horario: {time_str}"
@@ -283,7 +339,7 @@ class FindAppointmentTool:
         if not events:
             return "Nao encontrei nenhuma consulta futura para este telefone."
 
-        result = "Encontrei estas consultas futuras 😊:\n"
+        result = "Encontrei estas consultas futuras:\n"
         for event in events:
             start_str = event.get("start", {}).get("dateTime", "")
             if start_str:

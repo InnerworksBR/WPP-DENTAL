@@ -62,6 +62,22 @@ def _is_offered_slot(datetime_str: str, state: Any) -> bool:
         return True
 
 
+def _has_valid_direct_plan(patient_phone: str, state: Any, config: ConfigService) -> bool:
+    candidates = [getattr(state, "plan_name", "")]
+    patient = PatientService.find_by_phone(patient_phone)
+    if patient:
+        candidates.append(patient.get("plan", ""))
+
+    for candidate in candidates:
+        plan_name = str(candidate or "").strip()
+        if not plan_name:
+            continue
+        plan = config.get_plan_by_name(plan_name) or config.find_plan_fuzzy(plan_name)
+        if plan and not plan.get("referral", False):
+            return True
+    return False
+
+
 def _wrap(instance: Any) -> StructuredTool:
     return StructuredTool(
         name=instance.name,
@@ -277,6 +293,22 @@ class CleanAgentService:
                         messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
                         continue
 
+                    patient_name = str(call["args"].get("patient_name", "")).strip()
+                    normalized_name = re.sub(r"\D+", "", patient_name)
+                    if (
+                        not patient_name
+                        or patient_name.lower() == "paciente"
+                        or normalized_name == re.sub(r"\D+", "", patient_phone)
+                        or not _has_valid_direct_plan(patient_phone, state, self.config)
+                    ):
+                        result = (
+                            "Erro interno: antes de criar o agendamento, colete e valide o nome completo "
+                            "e o convenio/plano do paciente. Se for particular, registre como Particular. "
+                            "Pergunte o dado que estiver faltando e nao chame criar_agendamento ainda."
+                        )
+                        messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
+                        continue
+
                 tool = self._tool_map.get(call["name"])
                 if tool is None:
                     result = f"Erro: ferramenta '{call['name']}' não encontrada."
@@ -298,6 +330,14 @@ class CleanAgentService:
                             "[clean_agent] %s | slots ofertados salvos: %s %s",
                             patient_phone, state.offered_date, state.offered_times,
                         )
+
+                if call["name"] == "verificar_convenio" and "ENCAMINHAMENTO" not in result:
+                    plan_name = str(call["args"].get("plan_name", "")).strip()
+                    plan = self.config.get_plan_by_name(plan_name) or self.config.find_plan_fuzzy(plan_name)
+                    if plan and not plan.get("referral", False):
+                        state = ConversationStateService.get(patient_phone)
+                        state.plan_name = str(plan.get("name", plan_name)).strip()
+                        ConversationStateService.save(patient_phone, state)
 
                 # Limpa oferta após agendamento confirmado
                 if call["name"] == "criar_agendamento" and "agendada com sucesso" in result:

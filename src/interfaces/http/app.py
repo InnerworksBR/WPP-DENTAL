@@ -207,6 +207,16 @@ async def receive_message(request: Request):
     if escalation_response is not None:
         return escalation_response
 
+    if current_state.stage == "awaiting_plan_for_slot_confirmation":
+        plan_response = await _handle_pending_slot_plan(
+            phone=phone,
+            text=text,
+            contact_name=contact_name,
+            message_id=message_id,
+        )
+        if plan_response is not None:
+            return plan_response
+
     if current_state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
         confirmation_response = await _handle_appointment_confirmation(
             phone=phone,
@@ -426,6 +436,9 @@ def _get_patient_escalation_message() -> str:
 
 def _build_patient_name(phone: str, contact_name: str) -> str:
     """Resolve o nome mais confiavel disponivel para o paciente."""
+    state = ConversationStateService.get(phone)
+    if state.patient_name:
+        return state.patient_name
     patient_name = PatientService.resolve_name(phone)
     if patient_name:
         return patient_name
@@ -436,6 +449,54 @@ def _save_patient_if_missing(phone: str, patient_name: str) -> None:
     """Cria um cadastro minimo quando o paciente ainda nao existe."""
     state = ConversationStateService.get(phone)
     PatientService.upsert(phone, patient_name, state.plan_name or None)
+
+
+def _resolve_valid_plan_name(phone: str) -> str:
+    """Retorna o plano validado salvo no estado ou no cadastro do paciente."""
+    config = ConfigService()
+    state = ConversationStateService.get(phone)
+    candidates = [state.plan_name]
+
+    patient = PatientService.find_by_phone(phone)
+    if patient:
+        candidates.append(patient.get("plan", ""))
+
+    for candidate in candidates:
+        plan_name = str(candidate or "").strip()
+        if not plan_name:
+            continue
+        plan = config.get_plan_by_name(plan_name) or config.find_plan_fuzzy(plan_name)
+        if plan and not plan.get("referral", False):
+            canonical_name = str(plan.get("name", plan_name)).strip()
+            if state.plan_name != canonical_name:
+                state.plan_name = canonical_name
+                ConversationStateService.save(phone, state)
+            return canonical_name
+    return ""
+
+
+def _extract_direct_plan_name(text: str) -> str:
+    """Extrai um plano atendido diretamente a partir de texto livre."""
+    config = ConfigService()
+    plan = config.extract_plan_from_text(text)
+    if not plan:
+        return ""
+    if plan.get("referral", False):
+        return ""
+    return str(plan.get("name", "")).strip()
+
+
+def _is_referral_plan_text(text: str) -> bool:
+    config = ConfigService()
+    plan = config.extract_plan_from_text(text)
+    return bool(plan and plan.get("referral", False))
+
+
+def _build_plan_request_message() -> str:
+    return (
+        "Antes de confirmar, qual e o seu convenio/plano odontologico?\n"
+        "Se for particular, pode responder \"particular\"."
+    )
 
 
 def _register_scheduling_interaction(phone: str, summary: str) -> None:
@@ -475,6 +536,31 @@ def _build_slot_confirmation_request_message(
     )
 
 
+def _build_current_offer_message(state) -> str:
+    options = "\n".join(
+        f"{index}. {time_str}"
+        for index, time_str in enumerate(state.offered_times, 1)
+    )
+    return (
+        "Esse horario nao esta entre as opcoes que eu te passei.\n"
+        f"As opcoes para {state.offered_date} sao:\n{options}\n\n"
+        "Qual voce prefere?"
+    )
+
+
+def _looks_like_slot_choice(text: str) -> bool:
+    normalized = AppointmentOfferService._normalize(text)
+    if not normalized:
+        return False
+    if AppointmentOfferService._TIME_PATTERN.search(normalized):
+        return True
+    if AppointmentOfferService._FIRST_OPTION_PATTERN.search(normalized):
+        return True
+    if AppointmentOfferService._SECOND_OPTION_PATTERN.search(normalized):
+        return True
+    return False
+
+
 def _split_response_messages(response_text: str) -> list[str]:
     """Divide uma resposta em blocos curtos para envio no WhatsApp."""
     chunks = []
@@ -495,6 +581,73 @@ async def _send_response(phone: str, response_text: str) -> bool:
         if not delivered:
             return False
     return True
+
+
+async def _handle_pending_slot_plan(
+    phone: str,
+    text: str,
+    contact_name: str,
+    message_id: str,
+):
+    """Valida convenio antes de retomar a confirmacao do horario escolhido."""
+    state = ConversationStateService.get(phone)
+    if not state.pending_slot_date or not state.pending_slot_time:
+        ConversationStateService.clear(phone)
+        return None
+
+    if _is_referral_plan_text(text):
+        response_text = (
+            "Esse convenio e atendido por uma profissional parceira. "
+            "Vou encaminhar para a equipe verificar e te orientar."
+        )
+        ConversationStateService.clear(phone)
+    else:
+        plan_name = _extract_direct_plan_name(text)
+        if not plan_name:
+            response_text = (
+                "Nao consegui localizar esse convenio no sistema.\n"
+                "Pode conferir o nome, por favor? Se for particular, responda \"particular\"."
+            )
+        else:
+            patient_name = _build_patient_name(phone, contact_name)
+            if (
+                not patient_name
+                or patient_name == normalize_internal_phone(phone)
+                or patient_name.replace("+", "").isdigit()
+            ):
+                state.plan_name = plan_name
+                state.stage = "awaiting_name_for_slot_confirmation"
+                ConversationStateService.save(phone, state)
+                response_text = "Perfeito. Agora me informe seu nome completo para eu confirmar a consulta."
+            else:
+                state.plan_name = plan_name
+                state.stage = "idle"
+                ConversationStateService.save(phone, state)
+                PatientService.upsert(phone, patient_name, plan_name)
+                response_text = _build_slot_confirmation_request_message(
+                    patient_name=patient_name,
+                    date_str=state.pending_slot_date,
+                    time_str=state.pending_slot_time,
+                )
+
+    delivered = await _send_response(phone, response_text)
+    if not delivered:
+        if message_id:
+            _mark_message_failed(message_id, phone, "Failed to deliver pending slot plan message")
+        raise HTTPException(status_code=502, detail="Failed to deliver pending slot plan message")
+
+    ConversationService.add_message(phone, "patient", text)
+    ConversationService.add_message(phone, "assistant", response_text)
+    if message_id:
+        _mark_message_processed(message_id, phone)
+
+    return JSONResponse(
+        {
+            "status": "pending_slot_plan_resolved",
+            "phone": phone,
+            "response_preview": response_text[:100],
+        }
+    )
 
 
 async def _force_safe_escalation_response(
@@ -523,7 +676,7 @@ async def _handle_offered_slot_selection(
     """Resolve escolhas objetivas de horarios ja ofertados sem depender do LLM."""
     history = ConversationService.get_history(phone, limit=6)
     patient_name = _build_patient_name(phone, contact_name)
-    
+
     # Se nao tivermos certeza do nome (fallback para o telefone), repassamos para o LLM
     if not patient_name or patient_name == normalize_internal_phone(phone) or patient_name.replace("+", "").isdigit():
         return None
@@ -537,6 +690,31 @@ async def _handle_offered_slot_selection(
             pending_confirmation.time_str,
         )
         state = ConversationStateService.get(phone)
+        if not _resolve_valid_plan_name(phone):
+            state.pending_slot_date = pending_confirmation.date_str
+            state.pending_slot_time = pending_confirmation.time_str
+            state.stage = "awaiting_plan_for_slot_confirmation"
+            ConversationStateService.save(phone, state)
+            response_text = _build_plan_request_message()
+            delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver plan request message")
+                raise HTTPException(status_code=502, detail="Failed to deliver plan request message")
+
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+
+            return JSONResponse(
+                {
+                    "status": "slot_plan_required",
+                    "phone": phone,
+                    "response_preview": response_text[:100],
+                    "selected_time": pending_confirmation.time_str,
+                }
+            )
 
         try:
             calendar.create_appointment_if_available(
@@ -603,19 +781,63 @@ async def _handle_offered_slot_selection(
             }
         )
 
-    offer = AppointmentOfferService.extract_latest_offer(history)
+    state = ConversationStateService.get(phone)
+    offer = None
+    if state.offered_date and state.offered_times:
+        from ...domain.policies.appointment_offer_service import AppointmentOffer
+
+        offer = AppointmentOffer(date_str=state.offered_date, times=state.offered_times)
+    else:
+        offer = AppointmentOfferService.extract_latest_offer(history)
+        if offer:
+            state.offered_date = offer.date_str
+            state.offered_times = offer.times
+            ConversationStateService.save(phone, state)
+
     if offer is None:
         return None
 
     selected_time = AppointmentOfferService.resolve_selection(text, offer)
     if selected_time is None:
+        if state.offered_date and state.offered_times and _looks_like_slot_choice(text):
+            response_text = _build_current_offer_message(state)
+            delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver current offer message")
+                raise HTTPException(status_code=502, detail="Failed to deliver current offer message")
+
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+
+            return JSONResponse(
+                {
+                    "status": "slot_selection_rejected",
+                    "phone": phone,
+                    "response_preview": response_text[:100],
+                }
+            )
         return None
 
-    response_text = _build_slot_confirmation_request_message(
-        patient_name=patient_name,
-        date_str=offer.date_str,
-        time_str=selected_time,
-    )
+    state.pending_slot_date = offer.date_str
+    state.pending_slot_time = selected_time
+
+    if not _resolve_valid_plan_name(phone):
+        state.stage = "awaiting_plan_for_slot_confirmation"
+        ConversationStateService.save(phone, state)
+        response_text = _build_plan_request_message()
+        status = "slot_plan_required"
+    else:
+        state.stage = "idle"
+        ConversationStateService.save(phone, state)
+        response_text = _build_slot_confirmation_request_message(
+            patient_name=patient_name,
+            date_str=offer.date_str,
+            time_str=selected_time,
+        )
+        status = "slot_confirmation_requested"
 
     delivered = await _send_response(phone, response_text)
     if not delivered:
@@ -637,7 +859,7 @@ async def _handle_offered_slot_selection(
 
     return JSONResponse(
         {
-            "status": "slot_confirmation_requested",
+            "status": status,
             "phone": phone,
             "response_preview": response_text[:100],
             "selected_time": selected_time,
@@ -658,11 +880,12 @@ async def _handle_appointment_confirmation(
     normalized = AppointmentOfferService._normalize(text)
     
     if any(token in normalized for token in ("remarcar", "reagendar", "mudar", "outro horario")):
-        if event_id:
-            CalendarService().cancel_appointment(event_id)
-        
-        response_text = "Certo, cancelei a consulta atual. Para qual dia e periodo voce gostaria de remarcar?"
-        ConversationStateService.clear(phone)
+        state.intent = "reschedule"
+        state.stage = "idle"
+        state.reschedule_event_id = event_id or state.reschedule_event_id
+        state.reschedule_event_label = state.pending_event_label or state.reschedule_event_label
+        ConversationStateService.save(phone, state)
+        response_text = "Certo, vamos remarcar. Para qual dia e periodo voce gostaria de remarcar?"
         
         delivered = await _send_response(phone, response_text)
         if message_id:

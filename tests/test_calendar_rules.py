@@ -46,6 +46,72 @@ class TestCalendarRules:
         assert "3. 10/04/2026 as 09:30" in result
         assert "4. 10/04/2026 as 09:45" not in result
 
+    def test_get_available_slots_labels_weekday_and_date(self, monkeypatch):
+        from src.interfaces.tools.calendar_tool import GetAvailableSlotsTool
+
+        tool = GetAvailableSlotsTool()
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.ConfigService.get_suggestions_count",
+            lambda self: 2,
+        )
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.CalendarService.get_available_slots",
+            lambda self, target, period=None: [
+                {"formatted": "19/05/2026 as 08:00"},
+                {"formatted": "19/05/2026 as 08:15"},
+            ],
+        )
+
+        result = tool._run(date="19/05/2026", period="manha")
+
+        assert "terca-feira, 19/05/2026" in result
+        assert "quinta-feira, 19/05/2026" not in result
+
+    def test_get_available_slots_resolves_weekday_name(self, monkeypatch):
+        from src.interfaces.tools import calendar_tool
+        from src.interfaces.tools.calendar_tool import GetAvailableSlotsTool
+
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 5, 13, 10, 0, tzinfo=tz)
+
+        captured = {}
+        tool = GetAvailableSlotsTool()
+        monkeypatch.setattr(calendar_tool, "datetime", FixedDatetime)
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.ConfigService.get_suggestions_count",
+            lambda self: 2,
+        )
+
+        def fake_get_available_slots(self, target, period=None):
+            captured["target"] = target
+            return [{"formatted": "14/05/2026 as 08:00"}]
+
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.CalendarService.get_available_slots",
+            fake_get_available_slots,
+        )
+
+        result = tool._run(date="quinta", period="manha")
+
+        assert captured["target"].strftime("%d/%m/%Y") == "14/05/2026"
+        assert "quinta-feira, 14/05/2026" in result
+
+    def test_get_available_slots_returns_no_options_when_calendar_is_blocked(self, monkeypatch):
+        from src.interfaces.tools.calendar_tool import GetAvailableSlotsTool
+
+        tool = GetAvailableSlotsTool()
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.CalendarService.get_available_slots",
+            lambda self, target, period=None: [],
+        )
+
+        result = tool._run(date="15/05/2026", period="manha")
+
+        assert "Nao encontrei horarios disponiveis" in result
+        assert "1." not in result
+
     def test_create_appointment_rejects_weekend(self, monkeypatch):
         service = CalendarService()
         future = datetime.now(SAO_PAULO_TZ) + timedelta(days=1)
@@ -64,6 +130,8 @@ class TestCalendarRules:
     def test_create_appointment_rejects_time_outside_business_hours(self, monkeypatch):
         service = CalendarService()
         future = datetime.now(SAO_PAULO_TZ) + timedelta(days=3)
+        while future.weekday() >= 5:
+            future += timedelta(days=1)
         invalid_time = future.replace(hour=6, minute=0, second=0, microsecond=0)
 
         monkeypatch.setattr(service, "_slot_conflicts", lambda start, end: False)

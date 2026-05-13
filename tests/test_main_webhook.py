@@ -289,6 +289,10 @@ class TestMainWebhook:
             init_db()
             db = get_db()
             db.execute(
+                "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
+                ("11999999999", "Cristian", "Amil Dental"),
+            )
+            db.execute(
                 "INSERT INTO conversation_history (phone, role, content) VALUES (?, ?, ?)",
                 (
                     "5511999999999",
@@ -323,6 +327,181 @@ class TestMainWebhook:
         assert assistant_message is not None
         assert "Posso confirmar sua consulta?" in assistant_message["content"]
 
+    def test_offered_slot_selection_uses_state_for_second_option(self, monkeypatch):
+        import src.main as main
+        from src.application.services.conversation_state_service import ConversationState, ConversationStateService
+        from src.infrastructure.persistence.connection import get_db, init_db
+
+        call_count = {"process": 0, "create": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria repetir as opcoes"
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        def fake_create_appointment_if_available(self, patient_name, patient_phone, start_time):
+            call_count["create"] += 1
+            return {"id": "evt-123"}
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
+            fake_create_appointment_if_available,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            db = get_db()
+            db.execute(
+                "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
+                ("11999999999", "Maria", "Amil Dental"),
+            )
+            db.commit()
+            ConversationStateService.save(
+                "5511999999999",
+                ConversationState(offered_date="19/05/2026", offered_times=["08:45", "09:15"]),
+            )
+
+            payload = _build_payload("slot-state-2")
+            payload["data"]["message"]["conversation"] = "2"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "slot_confirmation_requested"
+        assert response.json()["selected_time"] == "09:15"
+        assert call_count["process"] == 0
+        assert call_count["create"] == 0
+
+    def test_slot_selection_requires_plan_before_confirmation(self, monkeypatch):
+        import src.main as main
+        from src.application.services.conversation_state_service import ConversationState, ConversationStateService
+        from src.infrastructure.persistence.connection import get_db, init_db
+
+        call_count = {"process": 0, "create": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria executar"
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        def fake_create_appointment_if_available(self, patient_name, patient_phone, start_time):
+            call_count["create"] += 1
+            return {"id": "evt-123"}
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
+            fake_create_appointment_if_available,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            db = get_db()
+            db.execute(
+                "INSERT INTO patients (phone, name) VALUES (?, ?)",
+                ("11999999999", "Maria"),
+            )
+            db.commit()
+            ConversationStateService.save(
+                "5511999999999",
+                ConversationState(offered_date="19/05/2026", offered_times=["08:45", "09:15"]),
+            )
+
+            payload = _build_payload("slot-plan-required")
+            payload["data"]["message"]["conversation"] = "2"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        state = ConversationStateService.get("5511999999999")
+        assert response.status_code == 200
+        assert response.json()["status"] == "slot_plan_required"
+        assert state.stage == "awaiting_plan_for_slot_confirmation"
+        assert state.pending_slot_time == "09:15"
+        assert call_count["process"] == 0
+        assert call_count["create"] == 0
+
+    def test_pending_slot_plan_resumes_confirmation_without_booking(self, monkeypatch):
+        import src.main as main
+        from src.application.services.conversation_state_service import ConversationState, ConversationStateService
+        from src.infrastructure.persistence.connection import get_db, init_db
+
+        call_count = {"process": 0, "create": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria executar"
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        def fake_create_appointment_if_available(self, patient_name, patient_phone, start_time):
+            call_count["create"] += 1
+            return {"id": "evt-123"}
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
+            fake_create_appointment_if_available,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            db = get_db()
+            db.execute(
+                "INSERT INTO patients (phone, name) VALUES (?, ?)",
+                ("11999999999", "Maria"),
+            )
+            db.commit()
+            ConversationStateService.save(
+                "5511999999999",
+                ConversationState(
+                    stage="awaiting_plan_for_slot_confirmation",
+                    pending_slot_date="19/05/2026",
+                    pending_slot_time="09:15",
+                ),
+            )
+
+            payload = _build_payload("slot-plan-resume")
+            payload["data"]["message"]["conversation"] = "Amil Dental"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        state = ConversationStateService.get("5511999999999")
+        assert response.status_code == 200
+        assert response.json()["status"] == "pending_slot_plan_resolved"
+        assert state.plan_name == "Amil Dental"
+        assert call_count["process"] == 0
+        assert call_count["create"] == 0
+
     def test_slot_confirmation_books_only_after_patient_confirms(self, monkeypatch):
         import src.main as main
         from src.infrastructure.persistence.connection import get_db, init_db
@@ -353,6 +532,10 @@ class TestMainWebhook:
         with TestClient(main.app) as client:
             init_db()
             db = get_db()
+            db.execute(
+                "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
+                ("11999999999", "Maria", "Amil Dental"),
+            )
             db.execute(
                 "INSERT INTO conversation_history (phone, role, content) VALUES (?, ?, ?)",
                 (
