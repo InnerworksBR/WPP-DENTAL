@@ -284,7 +284,6 @@ class TestMainWebhook:
             "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
             fake_create_appointment_if_available,
         )
-
         with TestClient(main.app) as client:
             init_db()
             db = get_db()
@@ -354,7 +353,6 @@ class TestMainWebhook:
             "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
             fake_create_appointment_if_available,
         )
-
         with TestClient(main.app) as client:
             init_db()
             db = get_db()
@@ -506,7 +504,7 @@ class TestMainWebhook:
         import src.main as main
         from src.infrastructure.persistence.connection import get_db, init_db
 
-        call_count = {"process": 0, "create": 0}
+        call_count = {"process": 0, "create": 0, "cancel": 0}
 
         def fake_process_message(**kwargs):
             call_count["process"] += 1
@@ -519,6 +517,10 @@ class TestMainWebhook:
             call_count["create"] += 1
             return {"id": "evt-123"}
 
+        def fake_cancel_appointment(self, event_id):
+            call_count["cancel"] += 1
+            return True
+
         monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
         monkeypatch.setattr(
             "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
@@ -527,6 +529,10 @@ class TestMainWebhook:
         monkeypatch.setattr(
             "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
             fake_create_appointment_if_available,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.cancel_appointment",
+            fake_cancel_appointment,
         )
 
         with TestClient(main.app) as client:
@@ -563,6 +569,7 @@ class TestMainWebhook:
         assert response.json()["selected_time"] == "08:00"
         assert call_count["process"] == 0
         assert call_count["create"] == 1
+        assert call_count["cancel"] == 0
 
         patient = get_db().execute(
             "SELECT phone FROM patients WHERE name = ?",
@@ -647,6 +654,193 @@ class TestMainWebhook:
         assert call_count["create"] == 1
         assert call_count["cancel"] == 1
         assert state.stage == "idle"
+
+    def test_slot_confirmation_preserves_state_when_reschedule_cancel_fails(self, monkeypatch):
+        import src.main as main
+        from src.infrastructure.persistence.connection import get_db, init_db
+        from src.application.services.conversation_state_service import ConversationState, ConversationStateService
+
+        call_count = {"process": 0, "create": 0, "cancel": 0, "alert": 0}
+        captured_alert = {}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria executar"
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        def fake_create_appointment_if_available(self, patient_name, patient_phone, start_time):
+            call_count["create"] += 1
+            return {"id": "evt-new"}
+
+        def fake_cancel_appointment(self, event_id):
+            call_count["cancel"] += 1
+            return False
+
+        def fake_send_alert(self, patient_name, patient_phone, summary, reason, last_message=""):
+            call_count["alert"] += 1
+            captured_alert.update(
+                {
+                    "patient_name": patient_name,
+                    "patient_phone": patient_phone,
+                    "summary": summary,
+                    "reason": reason,
+                    "last_message": last_message,
+                }
+            )
+            return True
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
+            fake_create_appointment_if_available,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.cancel_appointment",
+            fake_cancel_appointment,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.alert_service.AlertService.send_alert",
+            fake_send_alert,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            db = get_db()
+            db.execute(
+                "INSERT INTO conversation_history (phone, role, content) VALUES (?, ?, ?)",
+                (
+                    "5511999999999",
+                    "assistant",
+                    "Maria, encontrei esse horario para voce: 07/04/2026 as 08:00. Posso confirmar sua consulta?",
+                ),
+            )
+            db.commit()
+            ConversationStateService.save(
+                "5511999999999",
+                ConversationState(
+                    intent="reschedule",
+                    patient_name="Maria",
+                    plan_name="Amil Dental",
+                    reschedule_event_id="evt-old",
+                    reschedule_event_label="06/04/2026 as 09:00",
+                ),
+            )
+
+            payload = _build_payload("slot-confirm-partial")
+            payload["data"]["message"]["conversation"] = "Sim, pode confirmar"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        state = ConversationStateService.get("5511999999999")
+        assistant_message = get_db().execute(
+            "SELECT content FROM conversation_history WHERE role = ? ORDER BY id DESC LIMIT 1",
+            ("assistant",),
+        ).fetchone()
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "partial_reschedule_pending"
+        assert assistant_message is not None
+        assert "confirmar a remarcacao por completo" in assistant_message["content"]
+        assert call_count["process"] == 0
+        assert call_count["create"] == 1
+        assert call_count["cancel"] == 1
+        assert call_count["alert"] == 1
+        assert captured_alert["reason"] == "remarcacao_parcial"
+        assert "evt-old" in captured_alert["summary"]
+        assert "evt-new" in captured_alert["summary"]
+        assert state.intent == "reschedule"
+        assert state.reschedule_event_id == "evt-old"
+        assert state.metadata["partial_reschedule_new_event_id"] == "evt-new"
+        assert state.metadata["partial_reschedule_new_slot"] == "07/04/2026 08:00"
+        assert state.metadata["partial_reschedule_reason"] == "remarcacao_parcial"
+
+    def test_reschedule_without_original_event_does_not_create_new_event(self, monkeypatch):
+        import src.main as main
+        from src.infrastructure.persistence.connection import get_db, init_db
+        from src.application.services.conversation_state_service import ConversationState, ConversationStateService
+
+        call_count = {"process": 0, "create": 0, "cancel": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria executar"
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        def fake_create_appointment_if_available(self, patient_name, patient_phone, start_time):
+            call_count["create"] += 1
+            return {"id": "evt-new"}
+
+        def fake_cancel_appointment(self, event_id):
+            call_count["cancel"] += 1
+            return True
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
+            fake_create_appointment_if_available,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.cancel_appointment",
+            fake_cancel_appointment,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            db = get_db()
+            db.execute(
+                "INSERT INTO conversation_history (phone, role, content) VALUES (?, ?, ?)",
+                (
+                    "5511999999999",
+                    "assistant",
+                    "Maria, encontrei esse horario para voce: 07/04/2026 as 08:00. Posso confirmar sua consulta?",
+                ),
+            )
+            db.commit()
+            ConversationStateService.save(
+                "5511999999999",
+                ConversationState(
+                    intent="reschedule",
+                    patient_name="Maria",
+                    plan_name="Amil Dental",
+                ),
+            )
+
+            payload = _build_payload("slot-confirm-missing-old")
+            payload["data"]["message"]["conversation"] = "Sim, pode confirmar"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        state = ConversationStateService.get("5511999999999")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "reschedule_original_required"
+        assert "consulta antiga" in response.json()["response_preview"]
+        assert call_count["process"] == 0
+        assert call_count["create"] == 0
+        assert call_count["cancel"] == 0
+        assert state.intent == "reschedule"
+        assert state.pending_slot_date == "07/04/2026"
+        assert state.pending_slot_time == "08:00"
 
     def test_new_message_after_terminal_action_starts_fresh_context(self, monkeypatch):
         import src.main as main
@@ -777,6 +971,80 @@ class TestMainWebhook:
         assert response.status_code == 200
         assert response.json()["status"] == "processed"
         assert call_count["process"] == 1
+        assert call_count["create"] == 0
+        assert call_count["cancel"] == 0
+
+    def test_proactive_confirmation_reschedule_preserves_original_event_id(self, monkeypatch):
+        import src.main as main
+        from src.application.services.appointment_confirmation_service import AppointmentConfirmationService
+        from src.application.services.conversation_state_service import ConversationState, ConversationStateService
+        from src.infrastructure.persistence.connection import init_db
+
+        call_count = {"process": 0, "create": 0, "cancel": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria executar"
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        def fake_create_appointment_if_available(self, patient_name, patient_phone, start_time):
+            call_count["create"] += 1
+            return {"id": "evt-new"}
+
+        def fake_cancel_appointment(self, event_id):
+            call_count["cancel"] += 1
+            return True
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
+            fake_create_appointment_if_available,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.cancel_appointment",
+            fake_cancel_appointment,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            ConversationStateService.save(
+                "5511999999999",
+                ConversationState(
+                    stage=AppointmentConfirmationService.CONFIRMATION_STAGE,
+                    patient_name="Maria",
+                    plan_name="Amil Dental",
+                    pending_event_id="evt-old",
+                    pending_event_label="07/04/2026 as 08:00",
+                    metadata={
+                        AppointmentConfirmationService.METADATA_EVENT_ID_KEY: "evt-old",
+                    },
+                ),
+            )
+
+            payload = _build_payload("proactive-reschedule-1")
+            payload["data"]["message"]["conversation"] = "quero remarcar"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        state = ConversationStateService.get("5511999999999")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "reschedule_requested"
+        assert state.intent == "reschedule"
+        assert state.stage == "idle"
+        assert state.reschedule_event_id == "evt-old"
+        assert state.reschedule_event_label == "07/04/2026 as 08:00"
+        assert call_count["process"] == 0
         assert call_count["create"] == 0
         assert call_count["cancel"] == 0
 

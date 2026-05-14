@@ -214,6 +214,7 @@ class CreateAppointmentTool:
     description: str = (
         "Cria uma consulta no Google Calendar da doutora. "
         "Use quando o paciente escolher um dos horarios oferecidos - a escolha ja e a confirmacao, nao pergunte novamente. "
+        "Para remarcacao, use somente depois de identificar a consulta antiga com consultar_agendamento/event_id no estado do fluxo. "
         "A data e o horario devem estar no formato DD/MM/YYYY HH:MM."
     )
     args_schema: Type[BaseModel] = CreateAppointmentInput
@@ -257,6 +258,7 @@ class CancelAppointmentTool:
     name: str = "cancelar_agendamento"
     description: str = (
         "Cancela uma consulta existente do paciente no Google Calendar. "
+        "Use apos consultar_agendamento e apos confirmacao clara do paciente. "
         "Quando houver mais de uma consulta futura, use o event_id correto retornado por consultar_agendamento."
     )
     args_schema: Type[BaseModel] = CancelAppointmentInput
@@ -328,6 +330,7 @@ class FindAppointmentTool:
     name: str = "consultar_agendamento"
     description: str = (
         "Busca consultas futuras de um paciente pelo telefone. "
+        "Use antes de cancelar ou remarcar quando nao houver event_id no estado da conversa. "
         "Inclui o ID do evento para cancelamento e remarcacao seguros."
     )
     args_schema: Type[BaseModel] = FindAppointmentInput

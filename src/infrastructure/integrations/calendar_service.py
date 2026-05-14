@@ -3,6 +3,7 @@
 import base64
 import binascii
 import json
+import logging
 import os
 import threading
 import unicodedata
@@ -18,6 +19,7 @@ from ..config.config_service import ConfigService
 
 SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
 _APPOINTMENT_CREATION_LOCK = threading.Lock()
+logger = logging.getLogger("wpp-dental")
 
 
 class CalendarService:
@@ -532,7 +534,13 @@ class CalendarService:
             service = self._get_service()
             service.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()
             return True
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                "Falha ao cancelar evento no Google Calendar: event_id=%s: %s",
+                event_id,
+                exc,
+                exc_info=True,
+            )
             return False
 
     def find_appointment_by_patient(self, patient_name: str, patient_phone: str) -> Optional[dict]:

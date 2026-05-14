@@ -523,6 +523,68 @@ def _build_confirmation_message(date_str: str, time_str: str) -> str:
     return base
 
 
+def _build_reschedule_missing_original_message() -> str:
+    return (
+        "Para remarcar com seguranca, preciso identificar qual consulta antiga deve ser alterada.\n"
+        "Pode me confirmar a data e o horario da consulta que voce quer remarcar?"
+    )
+
+
+def _build_partial_reschedule_message(date_str: str, time_str: str) -> str:
+    return (
+        f"Recebi sua escolha para {date_str} as {time_str}, mas a equipe precisa conferir "
+        "o ajuste da agenda antes de confirmar a remarcacao por completo.\n"
+        "A doutora ja foi avisada e vamos te retornar com a confirmacao."
+    )
+
+
+def _get_event_id(event: dict[str, Any] | None) -> str:
+    if not isinstance(event, dict):
+        return ""
+    event_id = event.get("id")
+    return str(event_id).strip() if event_id else ""
+
+
+def _preserve_partial_reschedule_state(
+    *,
+    phone: str,
+    state,
+    new_event_id: str,
+    date_str: str,
+    time_str: str,
+) -> None:
+    state.intent = "reschedule"
+    state.stage = "idle"
+    state.pending_slot_date = date_str
+    state.pending_slot_time = time_str
+    state.metadata["partial_reschedule_new_event_id"] = new_event_id
+    state.metadata["partial_reschedule_new_slot"] = f"{date_str} {time_str}"
+    state.metadata["partial_reschedule_reason"] = "remarcacao_parcial"
+    ConversationStateService.save(phone, state)
+
+
+def _build_partial_reschedule_alert_summary(
+    *,
+    patient_phone: str,
+    patient_name: str,
+    old_event_id: str,
+    old_event_label: str,
+    new_event_id: str,
+    date_str: str,
+    time_str: str,
+) -> str:
+    return (
+        "Remarcacao parcial: novo horario foi criado, mas a consulta anterior nao foi "
+        "cancelada automaticamente.\n"
+        f"Paciente: {patient_name}\n"
+        f"Telefone: {patient_phone}\n"
+        f"Evento antigo: {old_event_id or 'N/A'}\n"
+        f"Consulta antiga: {old_event_label or 'N/A'}\n"
+        f"Evento novo: {new_event_id or 'N/A'}\n"
+        f"Novo horario: {date_str} as {time_str}"
+    )
+
+
 def _build_slot_confirmation_request_message(
     patient_name: str,
     date_str: str,
@@ -718,13 +780,47 @@ async def _handle_offered_slot_selection(
                 }
             )
 
+        if state.intent == "reschedule" and not state.reschedule_event_id:
+            state.stage = "idle"
+            state.pending_slot_date = pending_confirmation.date_str
+            state.pending_slot_time = pending_confirmation.time_str
+            ConversationStateService.save(phone, state)
+            response_text = _build_reschedule_missing_original_message()
+            delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(
+                        message_id,
+                        phone,
+                        "Failed to deliver missing reschedule original message",
+                    )
+                raise HTTPException(
+                    status_code=502,
+                    detail="Failed to deliver missing reschedule original message",
+                )
+
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+
+            return JSONResponse(
+                {
+                    "status": "reschedule_original_required",
+                    "phone": phone,
+                    "response_preview": response_text[:100],
+                    "selected_time": pending_confirmation.time_str,
+                }
+            )
+
         try:
-            calendar.create_appointment_if_available(
+            new_event = calendar.create_appointment_if_available(
                 patient_name=patient_name,
                 patient_phone=phone,
                 start_time=datetime.strptime(datetime_str, "%d/%m/%Y %H:%M"),
             )
         except ValueError as exc:
+            response_status = "slot_confirmation_unavailable"
             response_text = (
                 "Esse horario acabou de ficar indisponivel. 😕\n"
                 f"Era o de {pending_confirmation.date_str} as {pending_confirmation.time_str}.\n\n"
@@ -733,28 +829,65 @@ async def _handle_offered_slot_selection(
             logger.info("Confirmacao de horario ofertado falhou para %s: %s", phone, exc)
         else:
             _save_patient_if_missing(phone, patient_name)
-            if state.intent == "reschedule" and state.reschedule_event_id:
+            if state.intent == "reschedule":
+                new_event_id = _get_event_id(new_event)
                 cancelled = calendar.cancel_appointment(state.reschedule_event_id)
                 if not cancelled:
+                    _preserve_partial_reschedule_state(
+                        phone=phone,
+                        state=state,
+                        new_event_id=new_event_id,
+                        date_str=pending_confirmation.date_str,
+                        time_str=pending_confirmation.time_str,
+                    )
                     await _send_scope_alert(
                         patient_phone=phone,
                         patient_name=patient_name,
-                        summary=(
-                            "Novo horario confirmado, mas a consulta anterior nao foi cancelada "
-                            "automaticamente."
+                        summary=_build_partial_reschedule_alert_summary(
+                            patient_phone=phone,
+                            patient_name=patient_name,
+                            old_event_id=state.reschedule_event_id,
+                            old_event_label=state.reschedule_event_label,
+                            new_event_id=new_event_id,
+                            date_str=pending_confirmation.date_str,
+                            time_str=pending_confirmation.time_str,
                         ),
                         reason="remarcacao_parcial",
                         last_message=text,
                     )
-            _register_scheduling_interaction(
-                phone,
-                f"Agendamento confirmado em {pending_confirmation.date_str} as {pending_confirmation.time_str}",
-            )
-            response_text = _build_confirmation_message(
-                pending_confirmation.date_str,
-                pending_confirmation.time_str,
-            )
-            ConversationStateService.clear(phone)
+                    response_text = _build_partial_reschedule_message(
+                        pending_confirmation.date_str,
+                        pending_confirmation.time_str,
+                    )
+                    response_status = "partial_reschedule_pending"
+                else:
+                    _register_scheduling_interaction(
+                        phone,
+                        (
+                            "Remarcacao confirmada em "
+                            f"{pending_confirmation.date_str} as {pending_confirmation.time_str}"
+                        ),
+                    )
+                    response_text = _build_confirmation_message(
+                        pending_confirmation.date_str,
+                        pending_confirmation.time_str,
+                    )
+                    ConversationStateService.clear(phone)
+                    response_status = "slot_confirmation_resolved"
+            else:
+                _register_scheduling_interaction(
+                    phone,
+                    (
+                        "Agendamento confirmado em "
+                        f"{pending_confirmation.date_str} as {pending_confirmation.time_str}"
+                    ),
+                )
+                response_text = _build_confirmation_message(
+                    pending_confirmation.date_str,
+                    pending_confirmation.time_str,
+                )
+                ConversationStateService.clear(phone)
+                response_status = "slot_confirmation_resolved"
 
         delivered = await _send_response(phone, response_text)
         if not delivered:
@@ -776,7 +909,7 @@ async def _handle_offered_slot_selection(
 
         return JSONResponse(
             {
-                "status": "slot_confirmation_resolved",
+                "status": response_status,
                 "phone": phone,
                 "response_preview": response_text[:100],
                 "selected_time": pending_confirmation.time_str,
