@@ -79,6 +79,7 @@ def test_admin_page_is_served(admin_client: TestClient):
     assert response.status_code == 200
     assert "WPP-DENTAL Admin" in response.text
     assert "/admin/api/auth-config" in response.text
+    assert 'data-view="patients"' in response.text
 
 
 def test_admin_api_is_open_when_no_key_is_configured(admin_client: TestClient):
@@ -156,6 +157,43 @@ def test_summary_reads_sqlite_metrics(admin_client: TestClient):
     assert metrics["active_states"] == 1
     assert metrics["failed_messages_7d"] == 1
     assert metrics["pending_confirmations"] == 1
+
+
+def test_patients_returns_registered_users_with_history(admin_client: TestClient):
+    _seed_admin_data()
+    db = get_db()
+    db.execute(
+        "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
+        ("11888888888", "Ana Costa", "Particular"),
+    )
+    db.commit()
+
+    response = admin_client.get("/admin/api/patients?limit=1000")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert {item["name"] for item in items} == {"Maria Silva", "Ana Costa"}
+
+    maria = next(item for item in items if item["name"] == "Maria Silva")
+    assert maria["phone"] == "11999999999"
+    assert maria["plan"] == "Amil Dental"
+    assert maria["message_count"] == 2
+    assert maria["interaction_count"] == 1
+
+
+def test_patients_can_be_filtered(admin_client: TestClient):
+    _seed_admin_data()
+    db = get_db()
+    db.execute(
+        "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
+        ("11888888888", "Ana Costa", "Particular"),
+    )
+    db.commit()
+
+    response = admin_client.get("/admin/api/patients?q=Ana")
+
+    assert response.status_code == 200
+    assert [item["name"] for item in response.json()["items"]] == ["Ana Costa"]
 
 
 def test_conversations_and_detail_return_messages_and_interactions(admin_client: TestClient):

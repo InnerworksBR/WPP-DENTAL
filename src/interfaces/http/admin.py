@@ -138,6 +138,45 @@ async def get_summary(request: Request) -> dict[str, Any]:
     }
 
 
+@router.get("/api/patients")
+async def list_patients(request: Request, limit: int = 500, q: str = "") -> dict[str, Any]:
+    _require_admin(request)
+    limit = max(1, min(limit, 1000))
+    search = f"%{q.strip()}%"
+    params: list[Any] = []
+    where = ""
+    if q.strip():
+        where = "WHERE p.name LIKE ? OR p.phone LIKE ? OR COALESCE(p.plan, '') LIKE ?"
+        params.extend([search, search, search])
+
+    db = get_db()
+    rows = db.execute(
+        f"""
+        SELECT
+            p.id,
+            p.phone,
+            p.name,
+            p.plan,
+            p.created_at,
+            p.updated_at,
+            COUNT(DISTINCT i.id) AS interaction_count,
+            COUNT(DISTINCT h.id) AS message_count,
+            MAX(h.created_at) AS last_message_at,
+            s.updated_at AS state_updated_at
+        FROM patients p
+        LEFT JOIN interactions i ON i.patient_id = p.id
+        LEFT JOIN conversation_history h ON h.phone = p.phone
+        LEFT JOIN conversation_state s ON s.phone = p.phone
+        {where}
+        GROUP BY p.id
+        ORDER BY COALESCE(MAX(h.created_at), p.updated_at, p.created_at) DESC
+        LIMIT ?
+        """,
+        (*params, limit),
+    ).fetchall()
+    return {"items": [_row_to_dict(row) for row in rows]}
+
+
 @router.get("/api/conversations")
 async def list_conversations(request: Request, limit: int = 40) -> dict[str, Any]:
     _require_admin(request)
@@ -328,6 +367,7 @@ _ADMIN_HTML = r"""<!doctype html>
       --danger: #b42318;
       --ok: #13795b;
       --soft: #e9f6f7;
+      --warning: #8a5a00;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     * { box-sizing: border-box; }
@@ -354,16 +394,19 @@ _ADMIN_HTML = r"""<!doctype html>
       background: white;
       color: var(--text);
     }
-    .layout { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
-    aside { border-right: 1px solid var(--line); background: #fbfcfd; padding: 20px; }
-    main { padding: 22px; min-width: 0; }
-    .brand { font-weight: 800; font-size: 18px; margin-bottom: 4px; }
+    .layout { display: grid; grid-template-columns: 248px 1fr; min-height: 100vh; }
+    aside { border-right: 1px solid var(--line); background: #fbfcfd; padding: 18px; position: sticky; top: 0; height: 100vh; }
+    main { padding: 22px; min-width: 0; max-width: 1440px; width: 100%; }
+    .brand { font-weight: 800; font-size: 18px; margin-bottom: 4px; letter-spacing: 0; }
     .muted { color: var(--muted); font-size: 13px; }
     .auth { display: grid; gap: 8px; margin: 22px 0; }
-    nav { display: grid; gap: 8px; margin-top: 20px; }
-    nav button { text-align: left; }
+    nav { display: grid; gap: 6px; margin-top: 20px; }
+    nav button { text-align: left; display: flex; align-items: center; gap: 9px; justify-content: flex-start; }
+    nav button span:first-child { width: 20px; text-align: center; color: var(--muted); }
     nav button.active { background: var(--soft); border-color: #9bd1d8; color: var(--brand-strong); }
+    .nav-label { margin-top: 18px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+    .topbar h1 { margin: 0 0 4px; font-size: 24px; }
     .grid { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 12px; }
     .stat, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
     .stat { padding: 14px; }
@@ -371,6 +414,7 @@ _ADMIN_HTML = r"""<!doctype html>
     .panel { padding: 14px; margin-top: 14px; }
     .panel h2 { font-size: 16px; margin: 0 0 12px; }
     .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+    .toolbar input { max-width: 320px; }
     .split { display: grid; grid-template-columns: 360px 1fr; gap: 14px; align-items: start; }
     .list { display: grid; gap: 8px; }
     .row { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: white; }
@@ -389,12 +433,13 @@ _ADMIN_HTML = r"""<!doctype html>
     th { background: #f7fafb; color: #43515a; }
     td { overflow-wrap: anywhere; }
     .hidden { display: none; }
+    .badge { display: inline-flex; align-items: center; min-height: 24px; padding: 3px 8px; border-radius: 999px; background: #eef4f5; color: #43515a; font-size: 12px; white-space: nowrap; }
     .status { min-height: 20px; margin-top: 8px; color: var(--muted); font-size: 13px; }
     .error { color: var(--danger); }
     .ok { color: var(--ok); }
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }
-      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); position: static; height: auto; }
       .grid { grid-template-columns: repeat(2, 1fr); }
       .split { grid-template-columns: 1fr; }
       .topbar { align-items: flex-start; flex-direction: column; }
@@ -413,11 +458,15 @@ _ADMIN_HTML = r"""<!doctype html>
         <div id="auth-status" class="status"></div>
       </div>
       <nav>
-        <button class="active" data-view="dashboard">Visao geral</button>
-        <button data-view="conversations">Conversas</button>
-        <button data-view="appointments">Marcacoes</button>
-        <button data-view="blocks">Bloqueios</button>
-        <button data-view="errors">Erros</button>
+        <div class="nav-label">Operacao</div>
+        <button class="active" data-view="dashboard"><span>G</span><span>Visao geral</span></button>
+        <button data-view="patients"><span>P</span><span>Pacientes</span></button>
+        <button data-view="conversations"><span>C</span><span>Conversas</span></button>
+        <div class="nav-label">Agenda</div>
+        <button data-view="appointments"><span>A</span><span>Marcacoes</span></button>
+        <button data-view="blocks"><span>B</span><span>Bloqueios</span></button>
+        <div class="nav-label">Sistema</div>
+        <button data-view="errors"><span>!</span><span>Falhas</span></button>
       </nav>
     </aside>
     <main>
@@ -431,6 +480,17 @@ _ADMIN_HTML = r"""<!doctype html>
 
       <section id="view-dashboard">
         <div id="stats" class="grid"></div>
+      </section>
+
+      <section id="view-patients" class="hidden">
+        <div class="panel">
+          <div class="toolbar">
+            <strong>Pacientes cadastrados</strong>
+            <input id="patient-search" type="search" placeholder="Buscar por nome, telefone ou plano">
+            <button id="load-patients">Buscar</button>
+          </div>
+          <div id="patients-table"></div>
+        </div>
       </section>
 
       <section id="view-conversations" class="hidden">
@@ -545,10 +605,11 @@ _ADMIN_HTML = r"""<!doctype html>
       $(`view-${view}`).classList.remove("hidden");
       $("page-title").textContent = {
         dashboard: "Visao geral",
+        patients: "Pacientes",
         conversations: "Conversas",
         appointments: "Marcacoes",
         blocks: "Bloqueios",
-        errors: "Erros",
+        errors: "Falhas",
       }[view];
       loadCurrent();
     }
@@ -567,6 +628,20 @@ _ADMIN_HTML = r"""<!doctype html>
       $("stats").innerHTML = labels.map(([label, key]) =>
         `<div class="stat"><span class="muted">${label}</span><strong>${data.metrics[key]}</strong></div>`
       ).join("");
+    }
+
+    async function loadPatients() {
+      const query = $("patient-search").value.trim();
+      const data = await api(`/admin/api/patients?limit=1000&q=${encodeURIComponent(query)}`);
+      $("patients-table").innerHTML = table(["Paciente", "Telefone", "Plano", "Historico", "Atualizado"], data.items.map(item => `
+        <tr>
+          <td><strong>${escapeHtml(item.name)}</strong><div class="muted">Cadastro: ${fmt(item.created_at)}</div></td>
+          <td>${escapeHtml(item.phone)}</td>
+          <td>${item.plan ? `<span class="badge">${escapeHtml(item.plan)}</span>` : "-"}</td>
+          <td>${Number(item.message_count || 0)} msgs<br><span class="muted">${Number(item.interaction_count || 0)} interacoes</span></td>
+          <td>${fmt(item.last_message_at || item.updated_at)}</td>
+        </tr>
+      `));
     }
 
     async function loadConversations() {
@@ -674,6 +749,7 @@ _ADMIN_HTML = r"""<!doctype html>
           return;
         }
         if (state.view === "dashboard") await loadDashboard();
+        if (state.view === "patients") await loadPatients();
         if (state.view === "conversations") await loadConversations();
         if (state.view === "appointments") await loadAppointments();
         if (state.view === "blocks") await loadBlocks();
@@ -691,6 +767,10 @@ _ADMIN_HTML = r"""<!doctype html>
       loadCurrent();
     });
     $("refresh").addEventListener("click", loadCurrent);
+    $("load-patients").addEventListener("click", loadPatients);
+    $("patient-search").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadPatients();
+    });
     $("load-appointments").addEventListener("click", loadAppointments);
     $("create-block").addEventListener("click", createBlock);
 
