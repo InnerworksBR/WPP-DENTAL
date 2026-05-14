@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -14,6 +15,8 @@ from pydantic import BaseModel
 from ...infrastructure.config.config_service import ConfigService
 from ...infrastructure.integrations.calendar_service import CalendarService, SAO_PAULO_TZ
 from ...infrastructure.persistence.connection import get_db
+
+load_dotenv()
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -25,6 +28,14 @@ class DayBlockPayload(BaseModel):
     reason: str = ""
 
 
+def _clean_key(value: str) -> str:
+    """Normaliza chaves vindas de .env, headers e query string."""
+    cleaned = (value or "").strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+        return cleaned[1:-1].strip()
+    return cleaned
+
+
 def _configured_admin_keys() -> list[str]:
     """Retorna chaves aceitas para o painel administrativo."""
     candidates = (
@@ -32,20 +43,20 @@ def _configured_admin_keys() -> list[str]:
         os.getenv("WEBHOOK_API_KEY", ""),
         os.getenv("EVOLUTION_WEBHOOK_API_KEY", ""),
     )
-    return [key.strip() for key in candidates if key and key.strip()]
+    return [cleaned for key in candidates if (cleaned := _clean_key(key))]
 
 
 def _extract_key(request: Request) -> str:
     for header_name in ("x-admin-key", "x-api-key", "apikey"):
         value = request.headers.get(header_name)
         if value:
-            return value.strip()
+            return _clean_key(value)
 
     authorization = request.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):
-        return authorization[7:].strip()
+        return _clean_key(authorization[7:])
 
-    return request.query_params.get("key", "").strip()
+    return _clean_key(request.query_params.get("key", ""))
 
 
 def _require_admin(request: Request) -> None:
@@ -81,6 +92,12 @@ def _calendar_error_payload(exc: Exception) -> dict[str, Any]:
 async def admin_page() -> HTMLResponse:
     """Entrega o painel administrativo."""
     return HTMLResponse(_ADMIN_HTML)
+
+
+@router.get("/api/auth-config")
+async def get_auth_config() -> dict[str, Any]:
+    """Informa se os endpoints administrativos exigem chave."""
+    return {"protected": bool(_configured_admin_keys())}
 
 
 @router.get("/api/summary")
@@ -469,6 +486,7 @@ _ADMIN_HTML = r"""<!doctype html>
     const state = {
       view: "dashboard",
       key: localStorage.getItem("wppDentalAdminKey") || "",
+      protected: true,
     };
 
     const $ = (id) => document.getElementById(id);
@@ -485,6 +503,16 @@ _ADMIN_HTML = r"""<!doctype html>
         throw new Error(text || `HTTP ${response.status}`);
       }
       return response.json();
+    }
+
+    async function loadAuthConfig() {
+      try {
+        const response = await fetch("/admin/api/auth-config");
+        const data = await response.json();
+        state.protected = Boolean(data.protected);
+      } catch (error) {
+        state.protected = true;
+      }
     }
 
     function setStatus(id, text, type = "") {
@@ -641,6 +669,10 @@ _ADMIN_HTML = r"""<!doctype html>
     async function loadCurrent() {
       try {
         setStatus("auth-status", "");
+        if (state.protected && !state.key) {
+          setStatus("auth-status", "Informe a chave administrativa para carregar os dados.");
+          return;
+        }
         if (state.view === "dashboard") await loadDashboard();
         if (state.view === "conversations") await loadConversations();
         if (state.view === "appointments") await loadAppointments();
@@ -664,7 +696,7 @@ _ADMIN_HTML = r"""<!doctype html>
 
     const today = new Date();
     $("block-date").value = today.toISOString().slice(0, 10);
-    loadCurrent();
+    loadAuthConfig().then(loadCurrent);
   </script>
 </body>
 </html>

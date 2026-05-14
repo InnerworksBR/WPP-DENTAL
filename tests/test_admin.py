@@ -78,6 +78,7 @@ def test_admin_page_is_served(admin_client: TestClient):
 
     assert response.status_code == 200
     assert "WPP-DENTAL Admin" in response.text
+    assert "/admin/api/auth-config" in response.text
 
 
 def test_admin_api_is_open_when_no_key_is_configured(admin_client: TestClient):
@@ -85,6 +86,13 @@ def test_admin_api_is_open_when_no_key_is_configured(admin_client: TestClient):
 
     assert response.status_code == 200
     assert response.json()["service"] == "wpp-dental"
+
+
+def test_auth_config_reports_when_admin_api_is_open(admin_client: TestClient):
+    response = admin_client.get("/admin/api/auth-config")
+
+    assert response.status_code == 200
+    assert response.json() == {"protected": False}
 
 
 def test_admin_api_rejects_invalid_key(admin_client: TestClient, monkeypatch: pytest.MonkeyPatch):
@@ -95,8 +103,28 @@ def test_admin_api_rejects_invalid_key(admin_client: TestClient, monkeypatch: py
     assert response.status_code == 401
 
 
+def test_auth_config_reports_when_admin_api_is_protected(
+    admin_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("ADMIN_API_KEY", "admin-secret")
+
+    response = admin_client.get("/admin/api/auth-config")
+
+    assert response.status_code == 200
+    assert response.json() == {"protected": True}
+
+
 def test_admin_api_accepts_admin_key(admin_client: TestClient, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ADMIN_API_KEY", "admin-secret")
+
+    response = admin_client.get("/admin/api/summary", headers={"x-admin-key": "admin-secret"})
+
+    assert response.status_code == 200
+
+
+def test_admin_api_accepts_quoted_admin_key(admin_client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ADMIN_API_KEY", '"admin-secret"')
 
     response = admin_client.get("/admin/api/summary", headers={"x-admin-key": "admin-secret"})
 
