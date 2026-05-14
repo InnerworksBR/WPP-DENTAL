@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 load_dotenv()
 
+from .admin import router as admin_router
 from ...application.services.clean_agent_service import CleanAgentService
 from ...application.services.appointment_confirmation_service import AppointmentConfirmationService
 from ...application.services.conversation_service import ConversationService
@@ -105,6 +106,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.include_router(admin_router)
 
 dental_crew = CleanAgentService()
 

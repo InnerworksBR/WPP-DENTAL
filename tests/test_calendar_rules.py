@@ -176,6 +176,47 @@ class TestCalendarRules:
         assert appointments[0]["patient_name"] == "Maria Silva"
         assert appointments[0]["patient_phone"] == "11999999999"
 
+    def test_create_day_block_uses_all_day_busy_event(self, monkeypatch):
+        service = CalendarService()
+        captured = {}
+
+        class FakeInsert:
+            def execute(self):
+                return {"id": "block-1", **captured["body"]}
+
+        class FakeEvents:
+            def insert(self, calendarId, body):
+                captured["calendar_id"] = calendarId
+                captured["body"] = body
+                return FakeInsert()
+
+        fake_service = SimpleNamespace(events=lambda: FakeEvents())
+        monkeypatch.setattr(service, "_get_service", lambda: fake_service)
+
+        result = service.create_day_block(
+            datetime(2026, 5, 20, 0, 0, tzinfo=SAO_PAULO_TZ),
+            "Curso",
+        )
+
+        assert result["id"] == "block-1"
+        assert captured["body"]["start"]["date"] == "2026-05-20"
+        assert captured["body"]["end"]["date"] == "2026-05-21"
+        assert captured["body"]["transparency"] == "opaque"
+        assert captured["body"]["extendedProperties"]["private"]["wpp_dental_type"] == (
+            CalendarService.DAY_BLOCK_MARKER
+        )
+
+    def test_event_is_day_block_accepts_marker_and_legacy_summary(self):
+        assert CalendarService.event_is_day_block(
+            {
+                "extendedProperties": {
+                    "private": {"wpp_dental_type": CalendarService.DAY_BLOCK_MARKER}
+                }
+            }
+        )
+        assert CalendarService.event_is_day_block({"summary": "[WPP-DENTAL] Bloqueio antigo"})
+        assert not CalendarService.event_is_day_block({"summary": "Maria - 11999999999"})
+
     def test_get_service_uses_container_credentials_path_when_relative_file_is_missing(
         self, monkeypatch
     ):

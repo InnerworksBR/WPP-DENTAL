@@ -6,6 +6,10 @@ Assistente de agendamento odontologico via WhatsApp, integrado ao Google Calenda
 
 Atender o fluxo descrito em [`PRD.md`](./PRD.md) com um backend previsivel, testavel e pronto para operacao em VPS.
 
+## Documentacao tecnica
+
+A documentacao tecnica completa da solucao esta em [`docs/TECHNICAL_DOCUMENTATION.md`](./docs/TECHNICAL_DOCUMENTATION.md).
+
 ## Stack
 
 - Python 3.11+
@@ -74,6 +78,7 @@ O projeto agora pode ser publicado direto pelo Git usando o `Dockerfile` da raiz
 - `EVOLUTION_API_KEY`
 - `EVOLUTION_INSTANCE`
 - `WEBHOOK_API_KEY`
+- `ADMIN_API_KEY` opcional para proteger o painel `/admin` com uma chave separada
 - `GOOGLE_CALENDAR_ID`
 - `GOOGLE_SERVICE_ACCOUNT_FILE=/app/credentials/service-account.json`
 - `GOOGLE_SERVICE_ACCOUNT_JSON_BASE64` como alternativa mais pratica ao arquivo
@@ -146,6 +151,7 @@ Preencha o arquivo `.env` com:
 - `EVOLUTION_API_KEY`
 - `EVOLUTION_INSTANCE`
 - `WEBHOOK_API_KEY`
+- `ADMIN_API_KEY` opcional
 - `GOOGLE_CALENDAR_ID`
 - `DOCTOR_PHONE`
 - `DATABASE_PATH`
@@ -192,6 +198,15 @@ O projeto possui uma bateria com 10 conversas humanas simuladas, com variacoes d
 - API principal: `src.main:app`
 - Health check: `/health`
 - Webhook principal: `/webhook/message`
+- Painel administrativo: `/admin`
+
+## Painel administrativo
+
+O painel web fica em `/admin` e permite acompanhar status, erros, conversas, marcacoes futuras e bloqueios de agenda.
+
+Os endpoints do painel aceitam a chave `ADMIN_API_KEY`. Se ela nao estiver configurada, usam `WEBHOOK_API_KEY` ou `EVOLUTION_WEBHOOK_API_KEY` como fallback. Em desenvolvimento local sem nenhuma dessas chaves, o painel fica aberto.
+
+Bloqueios de dia sao criados como eventos de dia inteiro no Google Calendar. A regra de disponibilidade ja interpreta eventos de dia inteiro como agenda bloqueada, entao o agente deixa de sugerir horarios nessas datas.
 
 ## Observacoes
 

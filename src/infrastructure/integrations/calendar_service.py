@@ -26,6 +26,7 @@ class CalendarService:
     SCOPES = ["https://www.googleapis.com/auth/calendar"]
     DEFAULT_CREDENTIALS_PATH = "./credentials/service-account.json"
     CONTAINER_CREDENTIALS_PATH = "/app/credentials/service-account.json"
+    DAY_BLOCK_MARKER = "wpp_dental_day_block"
 
     def __init__(self) -> None:
         self.config = ConfigService()
@@ -274,6 +275,96 @@ class CalendarService:
             if not page_token:
                 break
         return all_items
+
+    def list_events_between(self, start_date: datetime, end_date: datetime) -> list[dict]:
+        """Retorna eventos em um intervalo de datas."""
+        service = self._get_service()
+        start_sp = self._normalize_datetime(start_date)
+        end_sp = self._normalize_datetime(end_date)
+
+        all_items: list[dict] = []
+        page_token: str | None = None
+        while True:
+            events_result = (
+                service.events()
+                .list(
+                    calendarId=self.calendar_id,
+                    timeMin=start_sp.isoformat(),
+                    timeMax=end_sp.isoformat(),
+                    singleEvents=True,
+                    orderBy="startTime",
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+            all_items.extend(events_result.get("items", []))
+            page_token = events_result.get("nextPageToken")
+            if not page_token:
+                break
+        return all_items
+
+    @classmethod
+    def event_is_day_block(cls, event: dict[str, Any]) -> bool:
+        """Indica se o evento foi criado pelo painel como bloqueio de dia."""
+        private_props = (
+            event.get("extendedProperties", {})
+            .get("private", {})
+        )
+        return (
+            private_props.get("wpp_dental_type") == cls.DAY_BLOCK_MARKER
+            or str(event.get("summary", "")).startswith("[WPP-DENTAL] Bloqueio")
+        )
+
+    def list_day_blocks(self, start_date: datetime, end_date: datetime) -> list[dict[str, Any]]:
+        """Lista bloqueios de dia criados pelo painel."""
+        blocks = []
+        for event in self.list_events_between(start_date, end_date):
+            if not self.event_is_day_block(event):
+                continue
+            blocks.append(
+                {
+                    "event_id": str(event.get("id", "")),
+                    "summary": str(event.get("summary", "")),
+                    "description": str(event.get("description", "")),
+                    "start_date": event.get("start", {}).get("date")
+                    or event.get("start", {}).get("dateTime", ""),
+                    "end_date": event.get("end", {}).get("date")
+                    or event.get("end", {}).get("dateTime", ""),
+                }
+            )
+        return blocks
+
+    def create_day_block(self, block_date: datetime, reason: str = "") -> dict:
+        """Cria um evento de dia inteiro para bloquear todos os horarios da data."""
+        service = self._get_service()
+        date_sp = self._normalize_datetime(block_date).date()
+        end_date = date_sp + timedelta(days=1)
+        clean_reason = (reason or "").strip()
+        summary = "[WPP-DENTAL] Bloqueio de agenda"
+        if clean_reason:
+            summary = f"{summary} - {clean_reason[:80]}"
+
+        event_body = {
+            "summary": summary,
+            "description": clean_reason or "Bloqueio criado pelo painel administrativo.",
+            "start": {"date": date_sp.isoformat()},
+            "end": {"date": end_date.isoformat()},
+            "transparency": "opaque",
+            "extendedProperties": {
+                "private": {
+                    "wpp_dental_type": self.DAY_BLOCK_MARKER,
+                }
+            },
+        }
+        return service.events().insert(calendarId=self.calendar_id, body=event_body).execute()
+
+    def delete_day_block(self, event_id: str) -> bool:
+        """Remove um bloqueio de dia criado no calendario."""
+        if not event_id:
+            return False
+        service = self._get_service()
+        service.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()
+        return True
 
     def get_available_slots(self, date: datetime, period: Optional[str] = None) -> list[dict]:
         """Retorna slots disponiveis em um dia e periodo."""
