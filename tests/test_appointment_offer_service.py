@@ -129,3 +129,39 @@ class TestAppointmentOfferService:
     def test_is_affirmative_confirmation(self):
         assert AppointmentOfferService.is_affirmative_confirmation("Sim, pode confirmar")
         assert not AppointmentOfferService.is_affirmative_confirmation("Nao, quero outro horario")
+
+    def test_extracts_rejection_constraint(self):
+        constraints = AppointmentOfferService.extract_request_constraints("Nao quero esse horario")
+
+        assert constraints.rejects_current_slot is True
+        assert constraints.changes_pending_confirmation is True
+
+    def test_extracts_earliest_time_constraint(self):
+        constraints = AppointmentOfferService.extract_request_constraints("So consigo depois das 13h")
+
+        assert constraints.earliest_time == "13:00"
+        assert constraints.changes_pending_confirmation is True
+
+    def test_extracts_first_monday_constraint(self):
+        constraints = AppointmentOfferService.extract_request_constraints("Primeira segunda-feira qualquer")
+
+        assert constraints.requested_weekday == "0"
+
+    def test_extracts_excluded_day_number_constraint(self):
+        constraints = AppointmentOfferService.extract_request_constraints("menos no dia primeiro")
+
+        assert constraints.excluded_day_numbers == [1]
+
+    def test_resolve_selection_rejects_same_time_with_different_day(self):
+        offer = AppointmentOfferService.extract_latest_offer(
+            [
+                {
+                    "role": "assistant",
+                    "content": "Soraia, separei este horario para voce 01/06/2026 as 14:30. Qual voce prefere?",
+                }
+            ]
+        )
+
+        selected = AppointmentOfferService.resolve_selection("Dia 8 as 14:30?", offer)
+
+        assert selected is None

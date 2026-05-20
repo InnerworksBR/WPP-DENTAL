@@ -22,7 +22,10 @@ from ...application.services.conversation_service import ConversationService
 from ...application.services.conversation_state_service import ConversationStateService
 from ...application.services.handoff_service import HandoffService
 from ...application.services.patient_service import PatientService
-from ...domain.policies.appointment_offer_service import AppointmentOfferService
+from ...domain.policies.appointment_offer_service import (
+    AppointmentOffer,
+    AppointmentOfferService,
+)
 from ...domain.policies.phone_service import normalize_conversation_phone, normalize_internal_phone
 from ...domain.policies.scope_guard_service import ScopeGuardService
 from ...infrastructure.config.config_service import ConfigService
@@ -228,6 +231,10 @@ async def receive_message(request: Request):
         )
         if confirmation_response is not None:
             return confirmation_response
+
+    recent_history = ConversationService.get_history(phone, limit=8)
+    _capture_schedule_constraints(phone, text, current_state, recent_history)
+    current_state = ConversationStateService.get(phone)
 
     if current_state.stage not in {
         "awaiting_cancel_confirmation",
@@ -612,6 +619,13 @@ def _build_current_offer_message(state) -> str:
     )
 
 
+def _build_stale_confirmation_message() -> str:
+    return (
+        "Esse horario anterior nao segue mais o que voce pediu.\n"
+        "Vou buscar uma nova opcao respeitando sua preferencia."
+    )
+
+
 def _looks_like_slot_choice(text: str) -> bool:
     normalized = AppointmentOfferService._normalize(text)
     if not normalized:
@@ -623,6 +637,118 @@ def _looks_like_slot_choice(text: str) -> bool:
     if AppointmentOfferService._SECOND_OPTION_PATTERN.search(normalized):
         return True
     return False
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    if value and value not in items:
+        items.append(value)
+
+
+def _resolve_excluded_day_numbers(day_numbers: list[int], requested_weekday: str = "") -> list[str]:
+    if not day_numbers:
+        return []
+
+    config = ConfigService()
+    now = datetime.now()
+    max_date = (now + timedelta(days=config.get_max_days_ahead())).date()
+    target_weekday = int(requested_weekday) if str(requested_weekday).isdigit() else None
+    dates = []
+
+    cursor = now.replace(day=1)
+    while cursor.date() <= max_date:
+        for day in day_numbers:
+            try:
+                candidate = cursor.replace(day=day)
+            except ValueError:
+                continue
+            if candidate.date() < now.date() or candidate.date() > max_date:
+                continue
+            if target_weekday is not None and candidate.weekday() != target_weekday:
+                continue
+            _append_unique(dates, candidate.strftime("%d/%m/%Y"))
+        if cursor.month == 12:
+            cursor = cursor.replace(year=cursor.year + 1, month=1)
+        else:
+            cursor = cursor.replace(month=cursor.month + 1)
+
+    return dates
+
+
+def _slot_satisfies_state_filters(date_str: str, time_str: str, state) -> bool:
+    if f"{date_str} {time_str}" in state.rejected_slots:
+        return False
+    if date_str in state.excluded_dates:
+        return False
+    if state.earliest_time and time_str < state.earliest_time:
+        return False
+    if state.requested_weekday:
+        try:
+            dt = datetime.strptime(date_str, "%d/%m/%Y")
+        except ValueError:
+            return True
+        if str(dt.weekday()) != str(state.requested_weekday):
+            return False
+    return True
+
+
+def _capture_schedule_constraints(phone: str, text: str, state, history: list[dict]) -> bool:
+    """Persistiu restricoes objetivas da ultima mensagem do paciente."""
+    constraints = AppointmentOfferService.extract_request_constraints(text)
+    if not constraints.changes_pending_confirmation:
+        return False
+
+    changed = False
+    if constraints.earliest_time and state.earliest_time != constraints.earliest_time:
+        state.earliest_time = constraints.earliest_time
+        changed = True
+    if constraints.requested_period and state.requested_period != constraints.requested_period:
+        state.requested_period = constraints.requested_period
+        changed = True
+    if constraints.requested_weekday and state.requested_weekday != constraints.requested_weekday:
+        state.requested_weekday = constraints.requested_weekday
+        changed = True
+
+    for excluded_date in constraints.excluded_dates:
+        if excluded_date not in state.excluded_dates:
+            state.excluded_dates.append(excluded_date)
+            changed = True
+
+    requested_weekday = constraints.requested_weekday or state.requested_weekday
+    for excluded_date in _resolve_excluded_day_numbers(
+        constraints.excluded_day_numbers,
+        requested_weekday=requested_weekday,
+    ):
+        if excluded_date not in state.excluded_dates:
+            state.excluded_dates.append(excluded_date)
+            changed = True
+
+    pending_confirmation = AppointmentOfferService.extract_latest_confirmation_request(history)
+    if constraints.rejects_current_slot and pending_confirmation:
+        rejected = f"{pending_confirmation.date_str} {pending_confirmation.time_str}"
+        if rejected not in state.rejected_slots:
+            state.rejected_slots.append(rejected)
+            changed = True
+    elif constraints.rejects_current_slot:
+        offer = None
+        if state.offered_date and state.offered_times:
+            offer = AppointmentOffer(state.offered_date, state.offered_times)
+        else:
+            offer = AppointmentOfferService.extract_latest_offer(history)
+        if offer:
+            for time_str in offer.times:
+                rejected = f"{offer.date_str} {time_str}"
+                if rejected not in state.rejected_slots:
+                    state.rejected_slots.append(rejected)
+                    changed = True
+
+    if changed:
+        state.pending_slot_date = ""
+        state.pending_slot_time = ""
+        state.offered_date = ""
+        state.offered_times = []
+        ConversationStateService.save(phone, state)
+
+    return changed
 
 
 def _split_response_messages(response_text: str) -> list[str]:
@@ -754,6 +880,31 @@ async def _handle_offered_slot_selection(
             pending_confirmation.time_str,
         )
         state = ConversationStateService.get(phone)
+        if not _slot_satisfies_state_filters(
+            pending_confirmation.date_str,
+            pending_confirmation.time_str,
+            state,
+        ):
+            response_text = _build_stale_confirmation_message()
+            delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver stale confirmation message")
+                raise HTTPException(status_code=502, detail="Failed to deliver stale confirmation message")
+
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+
+            return JSONResponse(
+                {
+                    "status": "slot_confirmation_stale",
+                    "phone": phone,
+                    "response_preview": response_text[:100],
+                }
+            )
+
         if not _resolve_valid_plan_name(phone):
             state.pending_slot_date = pending_confirmation.date_str
             state.pending_slot_time = pending_confirmation.time_str
@@ -955,6 +1106,27 @@ async def _handle_offered_slot_selection(
                 }
             )
         return None
+
+    if not _slot_satisfies_state_filters(offer.date_str, selected_time, state):
+        response_text = _build_stale_confirmation_message()
+        delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver invalid filtered slot message")
+            raise HTTPException(status_code=502, detail="Failed to deliver invalid filtered slot message")
+
+        ConversationService.add_message(phone, "patient", text)
+        ConversationService.add_message(phone, "assistant", response_text)
+        if message_id:
+            _mark_message_processed(message_id, phone)
+
+        return JSONResponse(
+            {
+                "status": "slot_selection_filtered",
+                "phone": phone,
+                "response_preview": response_text[:100],
+            }
+        )
 
     state.pending_slot_date = offer.date_str
     state.pending_slot_time = selected_time

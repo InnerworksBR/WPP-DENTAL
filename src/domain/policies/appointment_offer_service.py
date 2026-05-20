@@ -2,7 +2,7 @@
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -20,6 +20,19 @@ class AppointmentConfirmationRequest:
 
     date_str: str
     time_str: str
+
+
+@dataclass(frozen=True)
+class AppointmentRequestConstraints:
+    """Restricoes objetivas extraidas da mensagem do paciente."""
+
+    rejects_current_slot: bool = False
+    earliest_time: str = ""
+    requested_period: str = ""
+    requested_weekday: str = ""
+    excluded_day_numbers: list[int] = field(default_factory=list)
+    excluded_dates: list[str] = field(default_factory=list)
+    changes_pending_confirmation: bool = False
 
 
 class AppointmentOfferService:
@@ -70,6 +83,49 @@ class AppointmentOfferService:
         "outro horario",
         "outra opcao",
     )
+    _REJECTION_TOKENS = (
+        "nao quero",
+        "nao queria",
+        "nao consigo",
+        "nao posso",
+        "nao da",
+        "nao serve",
+        "tem outra",
+        "outra data",
+        "outro horario",
+        "outro dia",
+        "prefiro outro",
+    )
+    _PERIODS = {
+        "manha": "manha",
+        "tarde": "tarde",
+        "noite": "noite",
+    }
+    _WEEKDAY_TEXT = {
+        "segunda": "0",
+        "segunda feira": "0",
+        "terca": "1",
+        "terca feira": "1",
+        "quarta": "2",
+        "quarta feira": "2",
+        "quinta": "3",
+        "quinta feira": "3",
+        "sexta": "4",
+        "sexta feira": "4",
+    }
+    _DAY_WORDS = {
+        "primeiro": 1,
+        "um": 1,
+        "dois": 2,
+        "tres": 3,
+        "quatro": 4,
+        "cinco": 5,
+        "seis": 6,
+        "sete": 7,
+        "oito": 8,
+        "nove": 9,
+        "dez": 10,
+    }
 
     @staticmethod
     def _normalize(text: str) -> str:
@@ -161,6 +217,20 @@ class AppointmentOfferService:
         if not normalized:
             return None
 
+        explicit_dates = cls._DATE_PATTERN.findall(normalized)
+        if explicit_dates:
+            normalized_offer_date = offer.date_str
+            for explicit_date in explicit_dates:
+                candidate = explicit_date
+                if len(candidate) == 5:
+                    candidate = f"{candidate}/{datetime.now().year}"
+                if candidate != normalized_offer_date:
+                    return None
+
+        day_only_match = re.search(r"\bdia\s+(\d{1,2})\b", normalized)
+        if day_only_match and int(day_only_match.group(1)) != int(offer.date_str[:2]):
+            return None
+
         if len(offer.times) == 1 and any(
             token in normalized for token in ("sim", "pode ser", "confirmo", "fechado")
         ):
@@ -196,6 +266,89 @@ class AppointmentOfferService:
         if any(token in normalized for token in cls._NEGATIVE_CONFIRMATION_TOKENS):
             return False
         return any(token in normalized for token in cls._AFFIRMATIVE_CONFIRMATION_TOKENS)
+
+    @classmethod
+    def extract_request_constraints(cls, patient_message: str) -> AppointmentRequestConstraints:
+        """Extrai recusas e filtros de horario sem depender do LLM."""
+        normalized = cls._normalize(patient_message)
+        if not normalized:
+            return AppointmentRequestConstraints()
+
+        rejects_current_slot = any(token in normalized for token in cls._REJECTION_TOKENS)
+        if normalized in {"nao", "nao.", "não", "não."}:
+            rejects_current_slot = True
+
+        earliest_time = ""
+        earliest_patterns = (
+            r"(?:depois|apos|ap[oó]s|a partir)\s+d[ae]s?\s*(\d{1,2})(?::?(\d{2}))?\s*h?",
+            r"(?:so|somente|apenas)\s+(?:consigo\s+)?(?:depois|apos|a partir)\s+d[ae]s?\s*(\d{1,2})(?::?(\d{2}))?\s*h?",
+        )
+        for pattern in earliest_patterns:
+            match = re.search(pattern, normalized)
+            if match:
+                hour = int(match.group(1))
+                minute = int(match.group(2) or "00")
+                if 0 <= hour <= 23 and 0 <= minute <= 59:
+                    earliest_time = f"{hour:02d}:{minute:02d}"
+                break
+
+        requested_period = ""
+        for token, period in cls._PERIODS.items():
+            if re.search(rf"\b{token}\b", normalized):
+                requested_period = period
+                if period == "tarde" and not earliest_time:
+                    earliest_time = "12:00"
+                break
+
+        requested_weekday = ""
+        for token, weekday in cls._WEEKDAY_TEXT.items():
+            if re.search(rf"\b{token}\b", normalized):
+                requested_weekday = weekday
+                break
+
+        excluded_dates = []
+        for day, month, year in re.findall(
+            r"(?:menos|exceto|nao|n[aã]o)\s+(?:no\s+)?dia\s+(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?",
+            normalized,
+        ):
+            full_year = int(year) if year else datetime.now().year
+            if full_year < 100:
+                full_year += 2000
+            try:
+                excluded_dates.append(datetime(full_year, int(month), int(day)).strftime("%d/%m/%Y"))
+            except ValueError:
+                continue
+
+        excluded_day_numbers = []
+        for raw in re.findall(r"(?:menos|exceto|nao|n[aã]o)\s+(?:no\s+)?dia\s+(\d{1,2})\b", normalized):
+            day = int(raw)
+            if 1 <= day <= 31 and day not in excluded_day_numbers:
+                excluded_day_numbers.append(day)
+        for raw in re.findall(r"(?:menos|exceto|nao|n[aã]o)\s+(?:no\s+)?dia\s+([a-z]+)\b", normalized):
+            day = cls._DAY_WORDS.get(raw)
+            if day and day not in excluded_day_numbers:
+                excluded_day_numbers.append(day)
+
+        changes_pending_confirmation = any(
+            [
+                rejects_current_slot,
+                earliest_time,
+                requested_period,
+                requested_weekday,
+                excluded_dates,
+                excluded_day_numbers,
+            ]
+        )
+
+        return AppointmentRequestConstraints(
+            rejects_current_slot=rejects_current_slot,
+            earliest_time=earliest_time,
+            requested_period=requested_period,
+            requested_weekday=requested_weekday,
+            excluded_day_numbers=excluded_day_numbers,
+            excluded_dates=excluded_dates,
+            changes_pending_confirmation=changes_pending_confirmation,
+        )
 
     @classmethod
     def build_datetime_str(cls, date_str: str, time_str: str) -> str:

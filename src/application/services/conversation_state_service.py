@@ -30,6 +30,10 @@ class ConversationState:
     offered_times: list[str] = field(default_factory=list)
     pending_slot_date: str = ""
     pending_slot_time: str = ""
+    rejected_slots: list[str] = field(default_factory=list)
+    excluded_dates: list[str] = field(default_factory=list)
+    requested_weekday: str = ""
+    earliest_time: str = ""
 
 
 class ConversationStateService:

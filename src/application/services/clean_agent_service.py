@@ -50,13 +50,23 @@ def _parse_offered_slots(result: str) -> tuple[str, list[str]] | None:
 
 
 def _is_offered_slot(datetime_str: str, state: Any) -> bool:
-    if not state.offered_date or not state.offered_times:
-        return True
     try:
         dt = datetime.strptime(datetime_str, "%d/%m/%Y %H:%M")
+        date_str = dt.strftime("%d/%m/%Y")
+        time_str = dt.strftime("%H:%M")
+        if f"{date_str} {time_str}" in getattr(state, "rejected_slots", []):
+            return False
+        if date_str in getattr(state, "excluded_dates", []):
+            return False
+        if getattr(state, "earliest_time", "") and time_str < state.earliest_time:
+            return False
+        if getattr(state, "requested_weekday", "") and str(dt.weekday()) != str(state.requested_weekday):
+            return False
+        if not state.offered_date or not state.offered_times:
+            return True
         return (
-            dt.strftime("%d/%m/%Y") == state.offered_date
-            and dt.strftime("%H:%M") in state.offered_times
+            date_str == state.offered_date
+            and time_str in state.offered_times
         )
     except ValueError:
         return True
@@ -76,6 +86,25 @@ def _has_valid_direct_plan(patient_phone: str, state: Any, config: ConfigService
         if plan and not plan.get("referral", False):
             return True
     return False
+
+
+def _apply_state_slot_filters(args: dict, state: Any) -> dict:
+    filtered = dict(args or {})
+    if getattr(state, "earliest_time", "") and not filtered.get("earliest_time"):
+        filtered["earliest_time"] = state.earliest_time
+    if getattr(state, "excluded_dates", None) and not filtered.get("exclude_dates"):
+        filtered["exclude_dates"] = list(state.excluded_dates)
+    if getattr(state, "rejected_slots", None) and not filtered.get("exclude_slots"):
+        filtered["exclude_slots"] = list(state.rejected_slots)
+    if (
+        getattr(state, "requested_weekday", "")
+        and not filtered.get("weekday")
+        and "date" not in filtered
+    ):
+        filtered["weekday"] = state.requested_weekday
+    if getattr(state, "requested_period", "") and not filtered.get("period"):
+        filtered["period"] = state.requested_period
+    return filtered
 
 
 def _wrap(instance: Any) -> StructuredTool:
@@ -211,6 +240,9 @@ NUNCA dê preços, diagnósticos ou orientações clínicas. Em caso de dúvida,
 - Paciente menor de {min_age} anos: informe que atendemos a partir de {min_age} anos
 - Não repita perguntas já respondidas no histórico
 - ESTRITAMENTE PROIBIDO oferecer qualquer horário que não tenha sido retornado por uma ferramenta nesta conversa. Se o paciente pedir um horário não listado, informe a indisponibilidade e ofereça apenas as opções retornadas pela ferramenta.
+- Se o paciente recusou um horário, pediu outro dia/opção, ou disse "não", não ofereça novamente o mesmo dia+horário nessa conversa.
+- Se o paciente mudar a condição depois de uma pergunta de confirmação (ex.: "só depois das 13h", "primeira segunda", "menos dia 1"), descarte a confirmação anterior e busque novo horário que respeite a nova condição.
+- "Depois das 13h" significa apenas horários a partir de 13:00. "Primeira segunda-feira" deve usar a próxima segunda-feira real, respeitando antecedência mínima e datas excluídas pelo paciente.
 - Após oferecer os horários disponíveis, aguarde a escolha do paciente. NÃO chame `buscar_horarios_disponiveis` nem `buscar_proximo_dia_disponivel` novamente a menos que o paciente peça explicitamente um dia diferente.
 - NUNCA diga frases como "Um momento", "Aguarde", "Um segundo" ou "Vou processar". Se precisar usar uma ferramenta, chame-a imediatamente sem dar satisfação prévia. O paciente só deve ver o resultado final da operação.""".strip()
 
@@ -273,6 +305,10 @@ class CleanAgentService:
 
             messages.append(response)
             for call in response.tool_calls:
+                state = ConversationStateService.get(patient_phone)
+                if call["name"] in _SLOT_TOOLS:
+                    call["args"] = _apply_state_slot_filters(call.get("args", {}), state)
+
                 call_sig = (call["name"], str(sorted(call["args"].items())))
                 if call_sig in seen_calls:
                     logger.warning("[clean_agent] loop detectado: %s repetido com mesmos args", call["name"])
@@ -281,7 +317,6 @@ class CleanAgentService:
 
                 # Validação: criar_agendamento só executa com slot previamente ofertado
                 if call["name"] == "criar_agendamento":
-                    state = ConversationStateService.get(patient_phone)
                     datetime_str = call["args"].get("datetime_str", "")
                     if not _is_offered_slot(datetime_str, state):
                         logger.warning(

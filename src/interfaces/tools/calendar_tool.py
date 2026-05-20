@@ -66,6 +66,64 @@ def _date_label(dt: datetime) -> str:
     return f"{_WEEKDAY_NAMES[dt.weekday()]}, {dt.strftime('%d/%m/%Y')}"
 
 
+def _parse_time_filter(value: str | None) -> tuple[int, int] | None:
+    if not value:
+        return None
+    match = re.search(r"\b(\d{1,2}):(\d{2})\b", value)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+def _slot_start(slot: dict) -> datetime | None:
+    start = slot.get("start")
+    if isinstance(start, datetime):
+        return start
+    formatted = str(slot.get("formatted", ""))
+    match = re.search(r"\b(\d{2}/\d{2}/\d{4})\s+as\s+(\d{1,2}):(\d{2})\b", formatted)
+    if not match:
+        return None
+    return datetime.strptime(
+        f"{match.group(1)} {int(match.group(2)):02d}:{match.group(3)}",
+        "%d/%m/%Y %H:%M",
+    )
+
+
+def _filter_slots(
+    slots: list[dict],
+    *,
+    earliest_time: str | None = None,
+    exclude_dates: list[str] | None = None,
+    exclude_slots: list[str] | None = None,
+) -> list[dict]:
+    min_time = _parse_time_filter(earliest_time)
+    excluded_dates = set(exclude_dates or [])
+    excluded_slots = set(exclude_slots or [])
+    filtered = []
+
+    for slot in slots:
+        start = _slot_start(slot)
+        if start is None:
+            filtered.append(slot)
+            continue
+
+        date_str = start.strftime("%d/%m/%Y")
+        time_str = start.strftime("%H:%M")
+        if date_str in excluded_dates:
+            continue
+        if f"{date_str} {time_str}" in excluded_slots:
+            continue
+        if min_time and (start.hour, start.minute) < min_time:
+            continue
+        filtered.append(slot)
+
+    return filtered
+
+
 class GetAvailableSlotsInput(BaseModel):
     """Input para buscar horarios disponiveis."""
 
@@ -73,6 +131,18 @@ class GetAvailableSlotsInput(BaseModel):
     period: Optional[str] = Field(
         None,
         description="Periodo do dia: 'manha', 'tarde' ou 'noite'. Se nao informado, retorna o dia inteiro.",
+    )
+    earliest_time: Optional[str] = Field(
+        None,
+        description="Horario minimo no formato HH:MM, por exemplo 13:00.",
+    )
+    exclude_dates: list[str] = Field(
+        default_factory=list,
+        description="Datas DD/MM/YYYY que nao devem ser sugeridas.",
+    )
+    exclude_slots: list[str] = Field(
+        default_factory=list,
+        description="Slots DD/MM/YYYY HH:MM que nao devem ser sugeridos novamente.",
     )
 
 
@@ -84,11 +154,19 @@ class GetAvailableSlotsTool:
         "Busca horarios disponiveis para agendamento no Google Calendar. "
         "Retorna slots de 15 minutos que estao livres. "
         "A data deve estar no formato DD/MM/YYYY ou pode ser um dia da semana. "
-        "O periodo pode ser 'manha', 'tarde' ou 'noite'."
+        "O periodo pode ser 'manha', 'tarde' ou 'noite'. "
+        "Use earliest_time/exclude_dates/exclude_slots quando o paciente restringir ou recusar horarios."
     )
     args_schema: Type[BaseModel] = GetAvailableSlotsInput
 
-    def _run(self, date: str, period: Optional[str] = None) -> str:
+    def _run(
+        self,
+        date: str,
+        period: Optional[str] = None,
+        earliest_time: Optional[str] = None,
+        exclude_dates: Optional[list[str]] = None,
+        exclude_slots: Optional[list[str]] = None,
+    ) -> str:
         try:
             dt = _resolve_date_input(date)
         except ValueError as exc:
@@ -102,6 +180,12 @@ class GetAvailableSlotsTool:
 
         service = CalendarService()
         slots = service.get_available_slots(dt, period)
+        slots = _filter_slots(
+            slots,
+            earliest_time=earliest_time,
+            exclude_dates=exclude_dates,
+            exclude_slots=exclude_slots,
+        )
 
         if not slots:
             suffix = f" no periodo da {period}" if period else ""
@@ -135,6 +219,22 @@ class FindNextAvailableDayInput(BaseModel):
         2,
         description="Minimo de dias uteis a partir de hoje para comecar a buscar.",
     )
+    earliest_time: Optional[str] = Field(
+        None,
+        description="Horario minimo no formato HH:MM, por exemplo 13:00.",
+    )
+    exclude_dates: list[str] = Field(
+        default_factory=list,
+        description="Datas DD/MM/YYYY que nao devem ser sugeridas.",
+    )
+    exclude_slots: list[str] = Field(
+        default_factory=list,
+        description="Slots DD/MM/YYYY HH:MM que nao devem ser sugeridos novamente.",
+    )
+    weekday: Optional[str] = Field(
+        None,
+        description="Dia da semana desejado, como 'segunda' ou '0' para segunda-feira.",
+    )
 
 
 class FindNextAvailableDayTool:
@@ -144,11 +244,20 @@ class FindNextAvailableDayTool:
     description: str = (
         "Busca o proximo dia util que tenha horarios disponiveis. "
         "Comeca a busca respeitando a janela minima configurada para encaixes. "
-        "Retorna a quantidade configurada de opcoes de horarios no periodo solicitado."
+        "Retorna a quantidade configurada de opcoes de horarios no periodo solicitado. "
+        "Use weekday/earliest_time/exclude_dates/exclude_slots quando o paciente restringir ou recusar horarios."
     )
     args_schema: Type[BaseModel] = FindNextAvailableDayInput
 
-    def _run(self, period: Optional[str] = None, min_business_days: int = 2) -> str:
+    def _run(
+        self,
+        period: Optional[str] = None,
+        min_business_days: int = 2,
+        earliest_time: Optional[str] = None,
+        exclude_dates: Optional[list[str]] = None,
+        exclude_slots: Optional[list[str]] = None,
+        weekday: Optional[str] = None,
+    ) -> str:
         try:
             config = ConfigService()
             service = CalendarService()
@@ -159,6 +268,10 @@ class FindNextAvailableDayTool:
 
             if period:
                 period = period.lower().strip()
+            target_weekday = None
+            if weekday not in (None, ""):
+                weekday_text = _normalize_text(str(weekday))
+                target_weekday = int(weekday_text) if weekday_text.isdigit() else _WEEKDAY_LOOKUP.get(weekday_text)
 
             business_days_counted = 0
             while business_days_counted < min_business_days:
@@ -169,9 +282,18 @@ class FindNextAvailableDayTool:
             for _ in range(max_days_ahead):
                 while target.weekday() >= 5:
                     target += timedelta(days=1)
+                if target_weekday is not None and target.weekday() != target_weekday:
+                    target += timedelta(days=1)
+                    continue
 
                 try:
                     slots = service.get_available_slots(target, period)
+                    slots = _filter_slots(
+                        slots,
+                        earliest_time=earliest_time,
+                        exclude_dates=exclude_dates,
+                        exclude_slots=exclude_slots,
+                    )
                 except Exception:
                     target += timedelta(days=1)
                     continue

@@ -112,6 +112,81 @@ class TestCalendarRules:
         assert "Nao encontrei horarios disponiveis" in result
         assert "1." not in result
 
+    def test_get_available_slots_filters_rejected_and_early_slots(self, monkeypatch):
+        from src.interfaces.tools.calendar_tool import GetAvailableSlotsTool
+
+        tool = GetAvailableSlotsTool()
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.ConfigService.get_suggestions_count",
+            lambda self: 2,
+        )
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.CalendarService.get_available_slots",
+            lambda self, target, period=None: [
+                {"formatted": "26/05/2026 as 11:15"},
+                {"formatted": "26/05/2026 as 13:00"},
+                {"formatted": "26/05/2026 as 16:20"},
+                {"formatted": "26/05/2026 as 16:35"},
+            ],
+        )
+
+        result = tool._run(
+            date="26/05/2026",
+            period="tarde",
+            earliest_time="13:00",
+            exclude_slots=["26/05/2026 16:20"],
+        )
+
+        assert "11:15" not in result
+        assert "16:20" not in result
+        assert "1. 26/05/2026 as 13:00" in result
+        assert "2. 26/05/2026 as 16:35" in result
+
+    def test_find_next_available_day_skips_excluded_first_monday(self, monkeypatch):
+        from src.interfaces.tools import calendar_tool
+
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 5, 26, 10, 0, tzinfo=tz)
+
+        tool = FindNextAvailableDayTool()
+        monkeypatch.setattr(calendar_tool, "datetime", FixedDatetime)
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.ConfigService.get_min_business_days_ahead",
+            lambda self: 2,
+        )
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.ConfigService.get_suggestions_count",
+            lambda self: 2,
+        )
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.ConfigService.get_max_days_ahead",
+            lambda self: 30,
+        )
+
+        def fake_get_available_slots(self, target, period=None):
+            if target.strftime("%d/%m/%Y") == "01/06/2026":
+                return [{"formatted": "01/06/2026 as 14:30"}]
+            if target.strftime("%d/%m/%Y") == "08/06/2026":
+                return [{"formatted": "08/06/2026 as 14:30"}]
+            return []
+
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.CalendarService.get_available_slots",
+            fake_get_available_slots,
+        )
+
+        result = tool._run(
+            period="tarde",
+            min_business_days=0,
+            weekday="0",
+            exclude_dates=["01/06/2026"],
+        )
+
+        assert "01/06/2026" not in result
+        assert "08/06/2026 as 14:30" in result
+
     def test_create_appointment_rejects_weekend(self, monkeypatch):
         service = CalendarService()
         future = datetime.now(SAO_PAULO_TZ) + timedelta(days=1)

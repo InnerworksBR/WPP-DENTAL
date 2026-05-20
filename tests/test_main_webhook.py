@@ -1,6 +1,7 @@
 """Testes do webhook principal."""
 
 import os
+from datetime import datetime
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -841,6 +842,221 @@ class TestMainWebhook:
         assert state.intent == "reschedule"
         assert state.pending_slot_date == "07/04/2026"
         assert state.pending_slot_time == "08:00"
+
+    def test_rejected_pending_slot_is_persisted_before_llm(self, monkeypatch):
+        import src.main as main
+        from src.application.services.conversation_state_service import ConversationStateService
+        from src.infrastructure.persistence.connection import get_db, init_db
+
+        captured = {}
+
+        def fake_process_message(**kwargs):
+            captured["state"] = ConversationStateService.get(kwargs["patient_phone"])
+            return "Vou procurar outra opcao para voce."
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            db = get_db()
+            db.execute(
+                "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
+                ("11999999999", "Maria", "Amil Dental"),
+            )
+            db.execute(
+                "INSERT INTO conversation_history (phone, role, content) VALUES (?, ?, ?)",
+                (
+                    "5511999999999",
+                    "assistant",
+                    "Maria, separei este horario para voce 26/05/2026 as 16:20. Posso confirmar sua consulta?",
+                ),
+            )
+            db.commit()
+
+            payload = _build_payload("reject-slot-1")
+            payload["data"]["message"]["conversation"] = "Nao quero esse horario"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "processed"
+        assert "26/05/2026 16:20" in captured["state"].rejected_slots
+
+    def test_new_time_constraint_does_not_confirm_old_morning_slot(self, monkeypatch):
+        import src.main as main
+        from src.application.services.conversation_state_service import ConversationStateService
+        from src.infrastructure.persistence.connection import get_db, init_db
+
+        call_count = {"create": 0}
+        captured = {}
+
+        def fake_process_message(**kwargs):
+            captured["state"] = ConversationStateService.get(kwargs["patient_phone"])
+            return "Vou buscar uma opcao depois das 13h."
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        def fake_create_appointment_if_available(self, patient_name, patient_phone, start_time):
+            call_count["create"] += 1
+            return {"id": "evt-wrong"}
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
+            fake_create_appointment_if_available,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            db = get_db()
+            db.execute(
+                "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
+                ("11999999999", "Maria", "Amil Dental"),
+            )
+            db.execute(
+                "INSERT INTO conversation_history (phone, role, content) VALUES (?, ?, ?)",
+                (
+                    "5511999999999",
+                    "assistant",
+                    "Maria, separei este horario para voce 26/05/2026 as 11:15. Posso confirmar sua consulta?",
+                ),
+            )
+            db.commit()
+
+            payload = _build_payload("after-13-1")
+            payload["data"]["message"]["conversation"] = "Eu so consigo no periodo da tarde depois das 13h"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        assert response.status_code == 200
+        assert call_count["create"] == 0
+        assert captured["state"].earliest_time == "13:00"
+        assert captured["state"].requested_period == "tarde"
+
+    def test_same_time_with_different_day_is_not_treated_as_confirmation(self, monkeypatch):
+        import src.main as main
+        from src.application.services.conversation_state_service import ConversationState, ConversationStateService
+        from src.infrastructure.persistence.connection import get_db, init_db
+
+        call_count = {"create": 0, "process": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria executar"
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        def fake_create_appointment_if_available(self, patient_name, patient_phone, start_time):
+            call_count["create"] += 1
+            return {"id": "evt-wrong"}
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
+            fake_create_appointment_if_available,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            db = get_db()
+            db.execute(
+                "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
+                ("11999999999", "Maria", "Amil Dental"),
+            )
+            db.commit()
+            ConversationStateService.save(
+                "5511999999999",
+                ConversationState(offered_date="01/06/2026", offered_times=["14:30"]),
+            )
+
+            payload = _build_payload("day-8-1430")
+            payload["data"]["message"]["conversation"] = "Dia 8 as 14:30?"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "slot_selection_rejected"
+        assert call_count["create"] == 0
+        assert call_count["process"] == 0
+
+    def test_first_monday_with_excluded_day_is_persisted_before_llm(self, monkeypatch):
+        import importlib
+        import src.main as main
+        from src.application.services.conversation_state_service import ConversationStateService
+        from src.infrastructure.persistence.connection import get_db, init_db
+
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 5, 20, 10, 0, tzinfo=tz)
+
+        captured = {}
+
+        def fake_process_message(**kwargs):
+            captured["state"] = ConversationStateService.get(kwargs["patient_phone"])
+            return "Vou procurar a proxima segunda disponivel."
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        app_module = importlib.import_module("src.interfaces.http.app")
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(app_module, "datetime", FixedDatetime)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            db = get_db()
+            db.execute(
+                "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
+                ("11999999999", "Maria", "Amil Dental"),
+            )
+            db.commit()
+
+            payload = _build_payload("first-monday-minus-1")
+            payload["data"]["message"]["conversation"] = "Primeira segunda-feira qualquer, menos no dia primeiro"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        assert response.status_code == 200
+        assert captured["state"].requested_weekday == "0"
+        assert "01/06/2026" in captured["state"].excluded_dates
 
     def test_new_message_after_terminal_action_starts_fresh_context(self, monkeypatch):
         import src.main as main
