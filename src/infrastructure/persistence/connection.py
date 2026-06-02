@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     phone TEXT NOT NULL,
     content TEXT NOT NULL,
+    message_id TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -153,6 +154,7 @@ def _run_migrations(db: sqlite3.Connection) -> None:
     """Aplica migracoes leves compativeis com bancos ja existentes."""
     _ensure_column(db, "processed_messages", "status", "TEXT NOT NULL DEFAULT 'processed'")
     _ensure_column(db, "processed_messages", "last_error", "TEXT")
+    _ensure_column(db, "outbound_messages", "message_id", "TEXT")
     _normalize_patient_phone_rows(db)
 
 

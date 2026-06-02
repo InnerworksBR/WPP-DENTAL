@@ -1394,3 +1394,71 @@ class TestMainWebhook:
         assert follow_up.status_code == 200
         assert follow_up.json()["status"] == "processed"
         assert call_count["process"] == 2
+
+    def test_delayed_outbound_bot_echo_does_not_activate_handoff(self, monkeypatch):
+        import src.main as main
+        from src.infrastructure.persistence import OutboundMessageStore
+        from src.infrastructure.persistence.connection import get_db
+
+        with TestClient(main.app) as client:
+            OutboundMessageStore.record("5511999999999", "Resposta atrasada")
+            db = get_db()
+            db.execute(
+                "UPDATE outbound_messages SET created_at = datetime('now', '-10 minutes')"
+            )
+            db.commit()
+
+            echo = client.post(
+                "/webhook/message",
+                json=_build_from_me_payload("bot-echo-delayed", "Resposta atrasada"),
+                headers={"apikey": "test-secret"},
+            )
+
+        assert echo.status_code == 200
+        assert echo.json()["reason"] == "assistant_outbound_echo"
+
+    def test_repeated_outbound_bot_echo_does_not_activate_handoff(self):
+        import src.main as main
+        from src.infrastructure.persistence import OutboundMessageStore
+
+        with TestClient(main.app) as client:
+            OutboundMessageStore.record("5511999999999", "Resposta repetida")
+
+            first_echo = client.post(
+                "/webhook/message",
+                json=_build_from_me_payload("bot-echo-repeat-1", "Resposta repetida"),
+                headers={"apikey": "test-secret"},
+            )
+            second_echo = client.post(
+                "/webhook/message",
+                json=_build_from_me_payload("bot-echo-repeat-2", "Resposta repetida"),
+                headers={"apikey": "test-secret"},
+            )
+
+        assert first_echo.status_code == 200
+        assert first_echo.json()["reason"] == "assistant_outbound_echo"
+        assert second_echo.status_code == 200
+        assert second_echo.json()["reason"] == "assistant_outbound_echo"
+
+    def test_manual_message_with_same_text_and_different_id_still_activates_handoff(self):
+        import src.main as main
+        from src.infrastructure.persistence import OutboundMessageStore
+
+        with TestClient(main.app) as client:
+            OutboundMessageStore.record(
+                "5511999999999",
+                "Pode deixar que eu assumo daqui.",
+                "bot-message-id",
+            )
+
+            manual_message = client.post(
+                "/webhook/message",
+                json=_build_from_me_payload(
+                    "doctor-message-id",
+                    "Pode deixar que eu assumo daqui.",
+                ),
+                headers={"apikey": "test-secret"},
+            )
+
+        assert manual_message.status_code == 200
+        assert manual_message.json()["status"] == "handoff_activated"

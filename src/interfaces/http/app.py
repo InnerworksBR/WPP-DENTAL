@@ -358,7 +358,7 @@ def _handle_outbound_message(
     message_id: str,
 ):
     """Processa webhooks de mensagens enviadas pela propria instancia do WhatsApp."""
-    if OutboundMessageStore.consume_recent_match(phone, text):
+    if OutboundMessageStore.consume_recent_match(phone, text, message_id):
         logger.debug("Eco de mensagem automatica ignorado para %s", phone)
         if message_id:
             _mark_message_processed(message_id, phone)

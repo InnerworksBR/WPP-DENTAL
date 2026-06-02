@@ -40,6 +40,20 @@ class WhatsAppService:
 
         return digits
 
+    @staticmethod
+    def _extract_message_id(response: httpx.Response) -> str:
+        """Extrai o ID da mensagem retornado pela Evolution API quando disponivel."""
+        try:
+            payload = response.json()
+        except ValueError:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        key = payload.get("key", {})
+        if isinstance(key, dict) and key.get("id"):
+            return str(key["id"])
+        return str(payload.get("id", ""))
+
     async def send_message(self, phone: str, message: str) -> bool:
         """
         Envia uma mensagem de texto via WhatsApp.
@@ -67,7 +81,11 @@ class WhatsAppService:
                     headers=self._get_headers(),
                 )
                 response.raise_for_status()
-                OutboundMessageStore.record(formatted_phone, message)
+                OutboundMessageStore.record(
+                    formatted_phone,
+                    message,
+                    self._extract_message_id(response),
+                )
                 logger.info(f"Mensagem enviada para {formatted_phone}")
                 return True
         except httpx.HTTPError as e:
@@ -94,7 +112,11 @@ class WhatsAppService:
                     headers=self._get_headers(),
                 )
                 response.raise_for_status()
-                OutboundMessageStore.record(formatted_phone, message)
+                OutboundMessageStore.record(
+                    formatted_phone,
+                    message,
+                    self._extract_message_id(response),
+                )
                 logger.info(f"Mensagem enviada para {formatted_phone}")
                 return True
         except httpx.HTTPError as e:

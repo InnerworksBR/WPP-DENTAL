@@ -13,7 +13,6 @@ from .connection import get_db
 class OutboundMessageStore:
     """Rastreia mensagens enviadas para diferenciar eco do webhook de resposta manual."""
 
-    MATCH_WINDOW_MINUTES = 5
     RETENTION_HOURS = 24
 
     @staticmethod
@@ -38,7 +37,7 @@ class OutboundMessageStore:
         db.commit()
 
     @classmethod
-    def record(cls, phone: str, content: str) -> None:
+    def record(cls, phone: str, content: str, message_id: str = "") -> None:
         """Registra uma mensagem enviada pelo bot para posterior conciliacao com o webhook."""
         normalized_phone = cls._normalize_phone(phone)
         normalized_content = cls._normalize_content(content)
@@ -47,35 +46,39 @@ class OutboundMessageStore:
 
         db = get_db()
         db.execute(
-            "INSERT INTO outbound_messages (phone, content) VALUES (?, ?)",
-            (normalized_phone, content.strip()),
+            "INSERT INTO outbound_messages (phone, content, message_id) VALUES (?, ?, ?)",
+            (normalized_phone, content.strip(), (message_id or "").strip() or None),
         )
         db.commit()
         cls._cleanup()
 
     @classmethod
-    def consume_recent_match(cls, phone: str, content: str) -> bool:
-        """Consome um registro recente quando o webhook devolve o eco de uma mensagem do bot."""
+    def consume_recent_match(cls, phone: str, content: str, message_id: str = "") -> bool:
+        """Reconhece ecos do bot sem apagar o registro, pois o webhook pode repeti-los."""
         normalized_phone = cls._normalize_phone(phone)
         normalized_content = cls._normalize_content(content)
         if not normalized_phone or not normalized_content:
             return False
 
         db = get_db()
-        cutoff = datetime.utcnow() - timedelta(minutes=cls.MATCH_WINDOW_MINUTES)
+        cutoff = datetime.utcnow() - timedelta(hours=cls.RETENTION_HOURS)
         rows = db.execute(
-            "SELECT id, content FROM outbound_messages "
+            "SELECT id, content, message_id FROM outbound_messages "
             "WHERE phone = ? AND created_at > ? "
             "ORDER BY created_at ASC, id ASC",
             (normalized_phone, cutoff.strftime("%Y-%m-%d %H:%M:%S")),
         ).fetchall()
 
+        normalized_message_id = (message_id or "").strip()
         for row in rows:
+            if normalized_message_id and row["message_id"] == normalized_message_id:
+                cls._cleanup()
+                return True
+            if normalized_message_id and row["message_id"]:
+                continue
             if cls._normalize_content(row["content"]) != normalized_content:
                 continue
 
-            db.execute("DELETE FROM outbound_messages WHERE id = ?", (row["id"],))
-            db.commit()
             cls._cleanup()
             return True
 
