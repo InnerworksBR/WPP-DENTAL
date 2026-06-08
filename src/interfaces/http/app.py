@@ -315,22 +315,74 @@ def _extract_message_data(data: dict[str, Any] | list[Any]) -> dict[str, str] | 
     if isinstance(data, dict) and "key" in data and "message" in data:
         return _build_message_data(data)
 
+    parent_data = {}
+    if isinstance(data, dict):
+        parent_data = {key: value for key, value in data.items() if key != "messages"}
+
     messages = data if isinstance(data, list) else data.get("messages", [])
     if isinstance(messages, list):
         for message in messages:
             if isinstance(message, dict):
-                extracted = _build_message_data(message)
+                extracted = _build_message_data({**parent_data, **message})
                 if extracted is not None:
                     return extracted
 
     return None
 
 
+def _is_lid_jid(value: str) -> bool:
+    return str(value or "").strip().lower().endswith("@lid")
+
+
+def _is_whatsapp_jid(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized.endswith("@s.whatsapp.net") or normalized.endswith("@c.us")
+
+
+def _get_nested_string(source: dict[str, Any], path: tuple[str, ...]) -> str:
+    current: Any = source
+    for key in path:
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(key)
+    return current.strip() if isinstance(current, str) else ""
+
+
+def _resolve_message_phone(message_wrapper: dict[str, Any]) -> str:
+    """Resolve o telefone real, evitando usar LID como destinatario quando possivel."""
+    key = message_wrapper.get("key", {})
+    remote_jid = key.get("remoteJid", "") if isinstance(key, dict) else ""
+
+    candidate_paths = (
+        ("key", "remoteJid"),
+        ("key", "participant"),
+        ("key", "participantJid"),
+        ("participant",),
+        ("participantJid",),
+        ("sender",),
+        ("senderJid",),
+        ("from",),
+        ("remoteJid",),
+        ("contact", "id"),
+        ("contact", "jid"),
+        ("contact", "remoteJid"),
+    )
+    for path in candidate_paths:
+        candidate = _get_nested_string(message_wrapper, path)
+        if _is_whatsapp_jid(candidate):
+            return normalize_conversation_phone(candidate)
+
+    if _is_lid_jid(remote_jid):
+        local_part = remote_jid.split("@", 1)[0].strip()
+        return f"{local_part}@lid" if local_part else ""
+
+    return normalize_conversation_phone(remote_jid)
+
+
 def _build_message_data(message_wrapper: dict[str, Any]) -> dict[str, str] | None:
     """Constroi o dict padrao com dados da mensagem."""
     key = message_wrapper.get("key", {})
-    remote_jid = key.get("remoteJid", "")
-    phone = normalize_conversation_phone(remote_jid)
+    phone = _resolve_message_phone(message_wrapper)
 
     message = message_wrapper.get("message", {})
     text = (

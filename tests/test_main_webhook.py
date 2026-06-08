@@ -141,6 +141,90 @@ class TestMainWebhook:
         assert response.status_code == 200
         assert response.json()["status"] == "processed"
 
+    def test_lid_remote_jid_uses_real_sender_jid_for_reply(self, monkeypatch):
+        import src.main as main
+
+        captured = {"process_phone": "", "send_phone": ""}
+
+        def fake_process_message(**kwargs):
+            captured["process_phone"] = kwargs["patient_phone"]
+            return "Tudo certo"
+
+        async def fake_send_message(self, phone, message):
+            captured["send_phone"] = phone
+            return True
+
+        payload = _build_payload("lid-1")
+        payload["data"]["key"]["remoteJid"] = "123456789012345@lid"
+        payload["data"]["sender"] = "5511999999999@s.whatsapp.net"
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+
+        with TestClient(main.app) as client:
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["phone"] == "5511999999999"
+        assert captured == {
+            "process_phone": "5511999999999",
+            "send_phone": "5511999999999",
+        }
+
+    def test_lid_message_list_uses_parent_sender_jid_for_reply(self, monkeypatch):
+        import src.main as main
+
+        captured = {"send_phone": ""}
+
+        def fake_process_message(**kwargs):
+            return "Tudo certo"
+
+        async def fake_send_message(self, phone, message):
+            captured["send_phone"] = phone
+            return True
+
+        payload = {
+            "event": "messages.upsert",
+            "data": {
+                "sender": "5511999999999@s.whatsapp.net",
+                "messages": [
+                    {
+                        "key": {
+                            "id": "lid-list-1",
+                            "fromMe": False,
+                            "remoteJid": "123456789012345@lid",
+                        },
+                        "pushName": "Maria",
+                        "message": {"conversation": "Oi"},
+                    }
+                ],
+            },
+        }
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+
+        with TestClient(main.app) as client:
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["phone"] == "5511999999999"
+        assert captured["send_phone"] == "5511999999999"
+
     def test_failed_delivery_can_retry_same_message(self, monkeypatch):
         import src.main as main
         from src.application.services.conversation_service import ConversationService

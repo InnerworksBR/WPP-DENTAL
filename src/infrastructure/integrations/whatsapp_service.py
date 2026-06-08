@@ -2,7 +2,6 @@
 
 import os
 import logging
-from typing import Optional
 
 import httpx
 
@@ -32,7 +31,12 @@ class WhatsAppService:
         Remove caracteres especiais e garante formato correto.
         """
         # Remove tudo que não é dígito
+        if "@lid" in str(phone or "").lower():
+            return ""
+
         digits = "".join(c for c in phone if c.isdigit())
+        if not digits:
+            return ""
 
         # Se não começa com 55 (Brasil), adiciona
         if not digits.startswith("55"):
@@ -66,6 +70,10 @@ class WhatsAppService:
             True se enviada com sucesso
         """
         formatted_phone = self._format_phone(phone)
+        if not formatted_phone:
+            logger.error("Destinatario invalido para envio WhatsApp: %s", phone)
+            return False
+
         url = f"{self.base_url.rstrip('/')}/message/sendText/{self.instance}"
 
         payload = {
@@ -97,6 +105,10 @@ class WhatsAppService:
         Versão síncrona do envio de mensagem (para uso em tools CrewAI).
         """
         formatted_phone = self._format_phone(phone)
+        if not formatted_phone:
+            logger.error("Destinatario invalido para envio WhatsApp: %s", phone)
+            return False
+
         url = f"{self.base_url.rstrip('/')}/message/sendText/{self.instance}"
 
         payload = {
