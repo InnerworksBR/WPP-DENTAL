@@ -30,7 +30,7 @@ metodologia Spec-Driven. A `000` preserva o trabalho de remarcação parcial já
 |---|---|---|---|---|---|---|
 | 000 | Consistência de Remarcação Parcial | 🟢 Concluída (parcial) | 🟠 Alta | Remarcação não deixa evento antigo ativo; falha parcial não vira sucesso silencioso | — | 9 |
 | 001 | Estabilidade da API e Resiliência de IO | 🟢 Concluída | 🔴 Crítica | LLM com timeout/retry, offload do event loop, SQLite/Google sem crash | AG-01, EVENT-LOOP, WE-10, CONNECTION, AG-06/CA-03, WH-07 | 12 |
-| 002 | Recuperação da Rede de Testes | 🟡 Planejada | 🟠 Alta | Suíte verde; corrigir 67 testes mortos; cobrir o motor `CleanAgentService` | TE-01/02/03/05/07, EN-01/05 | 12 |
+| 002 | Recuperação da Rede de Testes | 🟢 Concluída | 🟠 Alta | Suíte verde; corrigir 67 testes mortos; cobrir o motor `CleanAgentService` | TE-01/02/03/05/07, EN-01/05 | 12 |
 | 003 | Robustez do Estado Conversacional | 🟡 Planejada | 🔴 Crítica | Anti-crash de schema drift, TTL, reset limpo, handoff sem destruir contexto | CO-01/02/03/07/08, HO-01 | 13 |
 | 004 | Identidade do Paciente e Normalização de Telefone | 🟡 Planejada | 🔴 Crítica | Telefone canônico (9º dígito), fim do paciente duplicado/trocado, cadastro não-destrutivo | PH-01..05, PA-01/02 | 12 |
 | 005 | Cancelamento Seguro | 🟡 Planejada | 🔴 Crítica | Nunca declarar cancelamento sem confirmação real; não cancelar a consulta errada | WE-01, CO-04/02, CA-01, CA-06, CA-07 | 12 |

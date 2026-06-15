@@ -1,7 +1,7 @@
 # Recuperação da Rede de Testes
 
 > **ID:** 002
-> **Status:** 🟡 Planejada
+> **Status:** 🟢 Concluída
 > **Prioridade:** 🟠 Alta
 > **Criada em:** 2026-06-15
 > **Última atualização:** 2026-06-15
