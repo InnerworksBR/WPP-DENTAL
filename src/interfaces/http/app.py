@@ -19,7 +19,10 @@ from .admin import router as admin_router
 from ...application.services.clean_agent_service import CleanAgentService
 from ...application.services.appointment_confirmation_service import AppointmentConfirmationService
 from ...application.services.conversation_service import ConversationService
-from ...application.services.conversation_state_service import ConversationStateService
+from ...application.services.conversation_state_service import (
+    ConversationState,
+    ConversationStateService,
+)
 from ...application.services.handoff_service import HandoffService
 from ...application.services.patient_service import PatientService
 from ...domain.policies.appointment_offer_service import (
@@ -114,6 +117,19 @@ app.include_router(admin_router)
 dental_crew = CleanAgentService()
 
 
+def _process_message_in_worker(**kwargs) -> str:
+    """Executa o motor de conversa em thread separada (libera o event loop).
+
+    Fecha a conexao SQLite por-thread ao final para nao reter o arquivo de banco
+    em threads de longa duracao do executor (importante sob troca de DATABASE_PATH
+    e em ambientes Windows que travam o arquivo enquanto a conexao esta aberta).
+    """
+    try:
+        return dental_crew.process_message(**kwargs)
+    finally:
+        close_db()
+
+
 @app.get("/")
 async def root_check():
     """Endpoint raiz para health checks mais simples de plataforma."""
@@ -201,7 +217,16 @@ async def receive_message(request: Request):
     if ConversationService.reset_context_if_finished(phone):
         ConversationStateService.clear(phone)
 
-    current_state = ConversationStateService.get(phone)
+    try:
+        current_state = ConversationStateService.get(phone)
+    except Exception as exc:
+        logger.error(
+            "Falha ao ler estado da conversa de %s; usando estado padrao: %s",
+            phone,
+            exc,
+            exc_info=True,
+        )
+        current_state = ConversationState()
 
     escalation_response = await _handle_scope_escalation(
         phone=phone,
@@ -254,7 +279,8 @@ async def receive_message(request: Request):
 
     try:
         response_text = str(
-            dental_crew.process_message(
+            await asyncio.to_thread(
+                _process_message_in_worker,
                 patient_phone=phone,
                 patient_message=text,
                 patient_name=contact_name,
@@ -1418,61 +1444,84 @@ def _is_processing_stale(processed_at: str | None, max_age_minutes: int = 5) -> 
 
 
 def _try_claim_message_processing(message_id: str, phone: str) -> tuple[bool, str]:
-    """Tenta reservar o processamento de uma mensagem."""
-    db = get_db()
-    cursor = db.execute(
-        "INSERT OR IGNORE INTO processed_messages (message_id, phone, status, last_error) "
-        "VALUES (?, ?, 'processing', NULL)",
-        (message_id, phone),
-    )
-    if cursor.rowcount == 1:
-        db.commit()
-        return True, "claimed"
+    """Tenta reservar o processamento de uma mensagem.
 
-    row = db.execute(
-        "SELECT status, processed_at FROM processed_messages WHERE message_id = ?",
-        (message_id,),
-    ).fetchone()
-    if row is None:
-        return False, "missing"
-
-    status = (row["status"] or "processed").lower()
-    if status == "failed" or (status == "processing" and _is_processing_stale(row["processed_at"])):
+    Em falha de SQLite (lock/IO) degrada de forma segura permitindo o
+    processamento (melhor um raro duplicado do que derrubar o atendimento com 500).
+    """
+    try:
+        db = get_db()
         cursor = db.execute(
+            "INSERT OR IGNORE INTO processed_messages (message_id, phone, status, last_error) "
+            "VALUES (?, ?, 'processing', NULL)",
+            (message_id, phone),
+        )
+        if cursor.rowcount == 1:
+            db.commit()
+            return True, "claimed"
+
+        row = db.execute(
+            "SELECT status, processed_at FROM processed_messages WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            return False, "missing"
+
+        status = (row["status"] or "processed").lower()
+        if status == "failed" or (status == "processing" and _is_processing_stale(row["processed_at"])):
+            cursor = db.execute(
+                "UPDATE processed_messages "
+                "SET phone = ?, status = 'processing', last_error = NULL, processed_at = CURRENT_TIMESTAMP "
+                "WHERE message_id = ?",
+                (phone, message_id),
+            )
+            db.commit()
+            if cursor.rowcount == 1:
+                return True, "reclaimed"
+
+        return False, status
+    except Exception as exc:
+        logger.error(
+            "Falha ao reservar processamento da mensagem %s; seguindo sem idempotencia: %s",
+            message_id,
+            exc,
+            exc_info=True,
+        )
+        return True, "claim_degraded"
+
+
+def _mark_message_processed(message_id: str, phone: str) -> None:
+    """Marca o message_id como processado com sucesso (degrada com log em falha de DB)."""
+    try:
+        db = get_db()
+        db.execute(
             "UPDATE processed_messages "
-            "SET phone = ?, status = 'processing', last_error = NULL, processed_at = CURRENT_TIMESTAMP "
+            "SET phone = ?, status = 'processed', last_error = NULL, processed_at = CURRENT_TIMESTAMP "
             "WHERE message_id = ?",
             (phone, message_id),
         )
         db.commit()
-        if cursor.rowcount == 1:
-            return True, "reclaimed"
-
-    return False, status
-
-
-def _mark_message_processed(message_id: str, phone: str) -> None:
-    """Marca o message_id como processado com sucesso."""
-    db = get_db()
-    db.execute(
-        "UPDATE processed_messages "
-        "SET phone = ?, status = 'processed', last_error = NULL, processed_at = CURRENT_TIMESTAMP "
-        "WHERE message_id = ?",
-        (phone, message_id),
-    )
-    db.commit()
+    except Exception as exc:
+        logger.error(
+            "Falha ao marcar mensagem %s como processada: %s", message_id, exc, exc_info=True
+        )
 
 
 def _mark_message_failed(message_id: str, phone: str, error: str) -> None:
-    """Registra falha para permitir retry futuro do mesmo webhook."""
-    db = get_db()
-    db.execute(
-        "UPDATE processed_messages "
-        "SET phone = ?, status = 'failed', last_error = ?, processed_at = CURRENT_TIMESTAMP "
-        "WHERE message_id = ?",
-        (phone, error[:500], message_id),
-    )
-    db.commit()
+    """Registra falha para permitir retry futuro do mesmo webhook (degrada com log)."""
+    try:
+        db = get_db()
+        db.execute(
+            "UPDATE processed_messages "
+            "SET phone = ?, status = 'failed', last_error = ?, processed_at = CURRENT_TIMESTAMP "
+            "WHERE message_id = ?",
+            (phone, error[:500], message_id),
+        )
+        db.commit()
+    except Exception as exc:
+        logger.error(
+            "Falha ao marcar mensagem %s como falha: %s", message_id, exc, exc_info=True
+        )
 
 
 async def _notify_doctor_of_processing_error(

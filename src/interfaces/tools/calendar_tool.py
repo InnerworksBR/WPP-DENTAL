@@ -1,5 +1,6 @@
 """Tool CrewAI para operacoes com o Google Calendar."""
 
+import logging
 import re
 import unicodedata
 from datetime import datetime, timedelta
@@ -10,6 +11,12 @@ from pydantic import BaseModel, Field
 from ...domain.policies.phone_service import normalize_internal_phone
 from ...infrastructure.config.config_service import ConfigService
 from ...infrastructure.integrations.calendar_service import CalendarService, SAO_PAULO_TZ
+
+logger = logging.getLogger("wpp-dental")
+
+_CALENDAR_SAFE_ERROR = (
+    "Erro: nao consegui consultar a agenda agora. Pode tentar novamente em instantes?"
+)
 
 
 _WEEKDAY_NAMES = [
@@ -179,7 +186,11 @@ class GetAvailableSlotsTool:
             )
 
         service = CalendarService()
-        slots = service.get_available_slots(dt, period)
+        try:
+            slots = service.get_available_slots(dt, period)
+        except Exception as exc:
+            logger.error("Erro ao buscar horarios em %s: %s", date, exc, exc_info=True)
+            return _CALENDAR_SAFE_ERROR
         slots = _filter_slots(
             slots,
             earliest_time=earliest_time,
@@ -318,7 +329,8 @@ class FindNextAvailableDayTool:
                 f"nos proximos {max_days_ahead} dias."
             )
         except Exception as exc:
-            return f"Erro ao buscar horarios: {exc}"
+            logger.error("Erro ao buscar proximo dia disponivel: %s", exc, exc_info=True)
+            return _CALENDAR_SAFE_ERROR
 
 
 class CreateAppointmentInput(BaseModel):
@@ -351,7 +363,14 @@ class CreateAppointmentTool:
         try:
             event = service.create_appointment_if_available(patient_name, patient_phone, dt)
         except ValueError as exc:
+            # Regras de negocio (slot ocupado, fora de horario etc.): mensagem segura.
             return f"Erro: {exc}"
+        except Exception as exc:
+            logger.error("Erro ao criar agendamento: %s", exc, exc_info=True)
+            return (
+                "Erro: nao consegui concluir o agendamento agora. "
+                "Pode tentar novamente em instantes?"
+            )
 
         return (
             "Perfeito!\n"
@@ -392,7 +411,11 @@ class CancelAppointmentTool:
         event_id: Optional[str] = None,
     ) -> str:
         service = CalendarService()
-        events = service.find_appointments_by_phone(patient_phone)
+        try:
+            events = service.find_appointments_by_phone(patient_phone)
+        except Exception as exc:
+            logger.error("Erro ao consultar consultas para cancelar: %s", exc, exc_info=True)
+            return _CALENDAR_SAFE_ERROR
 
         if not events:
             return "Nao encontrei nenhuma consulta futura para este paciente."
@@ -459,7 +482,11 @@ class FindAppointmentTool:
 
     def _run(self, patient_phone: str) -> str:
         service = CalendarService()
-        events = service.find_appointments_by_phone(patient_phone)
+        try:
+            events = service.find_appointments_by_phone(patient_phone)
+        except Exception as exc:
+            logger.error("Erro ao consultar agendamentos: %s", exc, exc_info=True)
+            return _CALENDAR_SAFE_ERROR
 
         if not events:
             return "Nao encontrei nenhuma consulta futura para este telefone."

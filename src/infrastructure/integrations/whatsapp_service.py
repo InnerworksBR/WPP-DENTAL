@@ -89,11 +89,19 @@ class WhatsAppService:
                     headers=self._get_headers(),
                 )
                 response.raise_for_status()
-                OutboundMessageStore.record(
-                    formatted_phone,
-                    message,
-                    self._extract_message_id(response),
-                )
+                # Persistencia do espelho de saida nao pode derrubar uma entrega ja concluida.
+                try:
+                    OutboundMessageStore.record(
+                        formatted_phone,
+                        message,
+                        self._extract_message_id(response),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Falha ao registrar mensagem enviada (entrega ja concluida): %s",
+                        exc,
+                        exc_info=True,
+                    )
                 logger.info(f"Mensagem enviada para {formatted_phone}")
                 return True
         except httpx.HTTPError as e:
@@ -124,11 +132,19 @@ class WhatsAppService:
                     headers=self._get_headers(),
                 )
                 response.raise_for_status()
-                OutboundMessageStore.record(
-                    formatted_phone,
-                    message,
-                    self._extract_message_id(response),
-                )
+                # Persistencia do espelho de saida nao pode derrubar uma entrega ja concluida.
+                try:
+                    OutboundMessageStore.record(
+                        formatted_phone,
+                        message,
+                        self._extract_message_id(response),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Falha ao registrar mensagem enviada (entrega ja concluida): %s",
+                        exc,
+                        exc_info=True,
+                    )
                 logger.info(f"Mensagem enviada para {formatted_phone}")
                 return True
         except httpx.HTTPError as e:

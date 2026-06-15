@@ -95,10 +95,17 @@ def get_db() -> sqlite3.Connection:
     """Retorna a conexao com o banco de dados da thread atual."""
     if not hasattr(_local, "connection") or _local.connection is None:
         db_path = _get_db_path()
-        _local.connection = sqlite3.connect(db_path)
+        # check_same_thread=True (explicito): cada thread tem sua propria conexao
+        # via threading.local, entao a conexao nunca cruza threads — inclusive nas
+        # threads do executor usadas por asyncio.to_thread no webhook.
+        _local.connection = sqlite3.connect(db_path, check_same_thread=True)
         _local.connection.row_factory = sqlite3.Row
         _local.connection.execute("PRAGMA journal_mode=WAL")
         _local.connection.execute("PRAGMA foreign_keys=ON")
+        # Espera por locks em vez de falhar imediatamente: webhook (event loop),
+        # threads do executor e scheduler async escrevem concorrentemente.
+        busy_timeout_ms = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000"))
+        _local.connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     return _local.connection
 
 

@@ -9,12 +9,25 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
+
+try:  # pragma: no cover - dependencias do SDK OpenAI
+    from openai import APIConnectionError, APITimeoutError, RateLimitError
+except Exception:  # pragma: no cover - fallback defensivo se o SDK mudar
+    class APITimeoutError(Exception):
+        ...
+
+    class RateLimitError(Exception):
+        ...
+
+    class APIConnectionError(Exception):
+        ...
 
 from .appointment_confirmation_service import AppointmentConfirmationService
 from .conversation_service import ConversationService
@@ -36,6 +49,16 @@ from ...interfaces.tools.patient_tool import FindPatientTool, SaveInteractionToo
 logger = logging.getLogger(__name__)
 
 _MAX_ITERATIONS = 8
+_LLM_RETRY_ATTEMPTS = 2
+_LLM_RETRY_BACKOFF_SECONDS = 1.5
+_LLM_BUSY_MESSAGE = (
+    "Estou com uma instabilidade momentanea por aqui 😕. "
+    "Pode me reenviar a sua ultima mensagem em alguns instantes, por favor?"
+)
+_TOOL_SAFE_ERROR = (
+    "Erro: nao consegui completar essa operacao agora. "
+    "Tente novamente em instantes ou siga com outra etapa do atendimento."
+)
 _SLOT_DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
 _SLOT_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
 _SLOT_TOOLS = {"buscar_horarios_disponiveis", "buscar_proximo_dia_disponivel"}
@@ -286,13 +309,43 @@ class CleanAgentService:
         llm = ChatOpenAI(
             model=os.getenv("OPENAI_MODEL", self.config.get_openai_model()),
             temperature=0,
+            request_timeout=float(os.getenv("OPENAI_REQUEST_TIMEOUT", "30")),
+            max_retries=int(os.getenv("OPENAI_MAX_RETRIES", "2")),
+            max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "700")),
         )
         self._llm = llm.bind_tools(self._tools)
+
+    def _invoke_llm(self, messages: list) -> AIMessage | None:
+        """Invoca o LLM com retry curto para instabilidade de rede.
+
+        Retorna ``None`` quando esgota as tentativas, para que o chamador
+        responda com uma mensagem amigavel em vez de propagar excecao/500.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, _LLM_RETRY_ATTEMPTS + 1):
+            try:
+                return self._llm.invoke(messages)
+            except (APITimeoutError, RateLimitError, APIConnectionError) as exc:
+                last_exc = exc
+                logger.warning(
+                    "[clean_agent] LLM instavel (tentativa %d/%d): %s",
+                    attempt,
+                    _LLM_RETRY_ATTEMPTS,
+                    exc,
+                )
+                if attempt < _LLM_RETRY_ATTEMPTS:
+                    time.sleep(_LLM_RETRY_BACKOFF_SECONDS * attempt)
+        logger.error(
+            "[clean_agent] LLM esgotou as tentativas: %s", last_exc, exc_info=True
+        )
+        return None
 
     def _run_loop(self, messages: list, patient_phone: str) -> str:
         seen_calls: set[tuple] = set()
         for iteration in range(_MAX_ITERATIONS):
-            response: AIMessage = self._llm.invoke(messages)
+            response = self._invoke_llm(messages)
+            if response is None:
+                return _LLM_BUSY_MESSAGE
 
             if not response.tool_calls:
                 return str(response.content).strip()
@@ -353,8 +406,14 @@ class CleanAgentService:
                     try:
                         result = str(tool.invoke(call["args"]))
                     except Exception as exc:
-                        result = f"Erro em '{call['name']}': {exc}"
-                        logger.warning("[clean_agent] tool %s falhou: %s", call["name"], exc)
+                        # Nao vazar detalhe tecnico (stack/HttpError) para o LLM/paciente.
+                        logger.warning(
+                            "[clean_agent] tool %s falhou: %s",
+                            call["name"],
+                            exc,
+                            exc_info=True,
+                        )
+                        result = _TOOL_SAFE_ERROR
 
                 # Rastreamento: armazena slots ofertados para validação futura
                 if call["name"] in _SLOT_TOOLS:
