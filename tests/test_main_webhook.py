@@ -724,6 +724,66 @@ class TestMainWebhook:
         assert state.stage == "awaiting_name_for_slot_confirmation"
         assert state.pending_slot_time == "14:15"
 
+    def test_organic_cancellation_asks_confirmation_then_cancels(self, monkeypatch):
+        """Regressao: 'Vou cancelar' organico nao entra em loop — pede SIM e cancela."""
+        import src.main as main
+        from src.application.services.conversation_state_service import ConversationStateService
+        from src.infrastructure.persistence.connection import init_db
+
+        call_count = {"process": 0, "cancel": 0, "lookup": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria executar"
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        def fake_find(self, phone):
+            call_count["lookup"] += 1
+            return [{"id": "evt-cancel-1", "start": {"dateTime": "2026-06-19T14:45:00-03:00"}, "summary": "Maria"}]
+
+        def fake_cancel(self, event_id):
+            call_count["cancel"] += 1
+            return CancelResult(cancelled=(event_id == "evt-cancel-1"), already_absent=False, error=None)
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.find_appointments_by_phone",
+            fake_find,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.cancel_appointment",
+            fake_cancel,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+
+            # 1) Paciente pede para cancelar -> bot pede confirmacao, NAO cancela ainda
+            p1 = _build_payload("cancel-1")
+            p1["data"]["message"]["conversation"] = "Vou cancelar"
+            r1 = client.post("/webhook/message", json=p1, headers={"apikey": "test-secret"})
+            assert r1.status_code == 200
+            assert r1.json()["status"] == "cancel_confirmation_requested"
+            assert call_count["cancel"] == 0
+            state = ConversationStateService.get("5511999999999")
+            assert state.stage == "awaiting_cancel_confirmation"
+            assert state.pending_event_id == "evt-cancel-1"
+
+            # 2) Paciente confirma -> cancela de verdade (sem loop)
+            p2 = _build_payload("cancel-2")
+            p2["data"]["message"]["conversation"] = "Sim"
+            r2 = client.post("/webhook/message", json=p2, headers={"apikey": "test-secret"})
+            assert r2.status_code == 200
+            assert r2.json()["status"] == "appointment_cancelled"
+            assert call_count["cancel"] == 1
+            assert call_count["process"] == 0
+
     def test_slot_confirmation_cancels_previous_event_when_rescheduling(self, monkeypatch):
         import src.main as main
         from src.infrastructure.persistence.connection import get_db, init_db

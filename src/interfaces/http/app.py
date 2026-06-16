@@ -356,6 +356,16 @@ async def receive_message(request: Request):
         if slot_selection_response is not None:
             return slot_selection_response
 
+        # Cancelamento organico deterministico: evita o loop do LLM (event_id nao persiste)
+        cancellation_response = await _handle_cancellation_intent(
+            phone=phone,
+            text=text,
+            contact_name=contact_name,
+            message_id=message_id,
+        )
+        if cancellation_response is not None:
+            return cancellation_response
+
     history_text = ConversationService.format_history_for_prompt(phone)
     is_first_message = not ConversationService.has_recent_history(phone)
 
@@ -1471,6 +1481,93 @@ _EXPLICIT_CANCEL_TOKENS = (
     "pode cancelar", "cancela", "cancele",
 )
 _AMBIGUOUS_CANCEL_TOKENS = ("nao sei", "talvez", "ainda nao", "nao tenho certeza", "nao to")
+
+# Intencao de cancelamento organica (fora do fluxo de cron). Conservador para nao
+# sequestrar remarcacao nem disparar em "nao" solto.
+_ORGANIC_CANCEL_TOKENS = ("cancelar", "desmarcar", "cancela", "cancele")
+
+
+async def _handle_cancellation_intent(
+    phone: str,
+    text: str,
+    contact_name: str,
+    message_id: str,
+):
+    """Cancelamento organico deterministico (impl 005 - Cancelamento Seguro).
+
+    Detecta a intencao de cancelar fora do fluxo de cron, identifica a consulta e
+    fixa o event_id no estado pedindo confirmacao. O "SIM" subsequente cai em
+    `_handle_appointment_confirmation` (stage awaiting_cancel_confirmation), que
+    executa o cancelamento — evitando o loop do LLM por nao persistir o event_id.
+    """
+    state = ConversationStateService.get(phone)
+    if state.stage not in ("idle", ""):
+        return None
+    if state.intent == "reschedule":
+        return None
+
+    normalized = AppointmentOfferService._normalize(text)
+    if not any(tok in normalized for tok in _ORGANIC_CANCEL_TOKENS):
+        return None
+    # Nao sequestrar remarcacao
+    if "remarc" in normalized or "reagend" in normalized or AppointmentOfferService.has_change_request(text):
+        return None
+
+    try:
+        events = CalendarService().find_appointments_by_phone(phone)
+    except Exception as exc:
+        logger.error("Erro ao consultar consultas para cancelamento organico: %s", exc, exc_info=True)
+        return None  # deixa o LLM tentar
+
+    if not events:
+        response_text = "Nao encontrei nenhuma consulta futura no seu nome para cancelar."
+        delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver no-appointment cancel message")
+            raise HTTPException(status_code=502, detail="Failed to deliver no-appointment cancel message")
+        if message_id:
+            _mark_message_processed(message_id, phone)
+        ConversationService.add_message(phone, "patient", text)
+        ConversationService.add_message(phone, "assistant", response_text)
+        return JSONResponse({"status": "cancel_no_appointment", "phone": phone})
+
+    if len(events) > 1:
+        # Multiplas consultas: deixa o LLM desambiguar com consultar_agendamento.
+        return None
+
+    evt = events[0]
+    evt_id = str(evt.get("id", "") or "")
+    start_str = str(evt.get("start", {}).get("dateTime", "") or "")
+    if not evt_id or not start_str:
+        return None
+
+    try:
+        label = datetime.fromisoformat(start_str).strftime("%d/%m/%Y as %H:%M")
+    except ValueError:
+        label = "sua consulta"
+
+    state.pending_event_id = evt_id
+    state.pending_event_label = label
+    state.metadata[AppointmentConfirmationService.METADATA_EVENT_ID_KEY] = evt_id
+    state.metadata[AppointmentConfirmationService.METADATA_START_KEY] = start_str
+    state.stage = "awaiting_cancel_confirmation"
+    ConversationStateService.save(phone, state)
+
+    response_text = (
+        f"Encontrei sua consulta de {label}.\n\n"
+        "Voce confirma o cancelamento? Responda SIM para confirmar."
+    )
+    delivered = await _send_response(phone, response_text)
+    if not delivered:
+        if message_id:
+            _mark_message_failed(message_id, phone, "Failed to deliver organic cancel confirmation")
+        raise HTTPException(status_code=502, detail="Failed to deliver organic cancel confirmation")
+    if message_id:
+        _mark_message_processed(message_id, phone)
+    ConversationService.add_message(phone, "patient", text)
+    ConversationService.add_message(phone, "assistant", response_text)
+    return JSONResponse({"status": "cancel_confirmation_requested", "phone": phone})
 
 
 async def _handle_appointment_confirmation(
