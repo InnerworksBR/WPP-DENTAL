@@ -660,6 +660,70 @@ class TestMainWebhook:
         # PH-01: formato canônico = DDD(2) + 8 dígitos (9o dígito removido)
         assert patient["phone"] == "1199999999"
 
+    def test_slot_confirmation_requests_name_when_name_is_placeholder(self, monkeypatch):
+        """Regressao: paciente sem nome real confirma -> bot pede o nome, nao diz 'indisponivel'."""
+        import src.main as main
+        from src.infrastructure.persistence.connection import get_db, init_db
+        from src.application.services.conversation_state_service import ConversationStateService
+
+        call_count = {"process": 0, "create": 0}
+
+        def fake_process_message(**kwargs):
+            call_count["process"] += 1
+            return "Nao deveria executar"
+
+        async def fake_send_message(self, phone, message):
+            return True
+
+        def fake_create_appointment_if_available(self, patient_name, patient_phone, start_time):
+            call_count["create"] += 1
+            return {"id": "evt-123"}
+
+        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
+            fake_create_appointment_if_available,
+        )
+
+        with TestClient(main.app) as client:
+            init_db()
+            db = get_db()
+            # Paciente com plano valido (Particular) mas nome placeholder
+            db.execute(
+                "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
+                ("11999999999", "Paciente", "Particular"),
+            )
+            db.execute(
+                "INSERT INTO conversation_history (phone, role, content) VALUES (?, ?, ?)",
+                (
+                    "5511999999999",
+                    "assistant",
+                    "Paciente, separei este horario para voce 22/06/2026 as 14:15. Posso confirmar sua consulta?",
+                ),
+            )
+            db.commit()
+
+            payload = _build_payload("slot-name-required")
+            payload["data"]["message"]["conversation"] = "sim"
+
+            response = client.post(
+                "/webhook/message",
+                json=payload,
+                headers={"apikey": "test-secret"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "slot_name_required"
+        # Nao tenta agendar com nome placeholder
+        assert call_count["create"] == 0
+        state = ConversationStateService.get("5511999999999")
+        assert state.stage == "awaiting_name_for_slot_confirmation"
+        assert state.pending_slot_time == "14:15"
+
     def test_slot_confirmation_cancels_previous_event_when_rescheduling(self, monkeypatch):
         import src.main as main
         from src.infrastructure.persistence.connection import get_db, init_db

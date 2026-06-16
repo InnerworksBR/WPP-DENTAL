@@ -618,6 +618,22 @@ def _save_patient_if_missing(phone: str, patient_name: str) -> None:
     PatientService.upsert(phone, patient_name, state.plan_name or None)
 
 
+def _is_valid_booking_name(name: str) -> bool:
+    """Espelha a validacao de nome de create_appointment_if_available.
+
+    Evita que placeholders ("Paciente"), telefone ou strings vazias cheguem ao
+    agendamento e gerem a mensagem enganosa de "horario indisponivel".
+    """
+    clean = (name or "").strip()
+    if not clean:
+        return False
+    if clean.lower() == "paciente":
+        return False
+    if clean.replace("+", "").isdigit():
+        return False
+    return True
+
+
 def _reset_to_idle(state: ConversationState) -> ConversationState:
     """CO-08: Reseta todos os campos do estado para os defaults (stage='idle')."""
     defaults = ConversationState()
@@ -952,11 +968,7 @@ async def _handle_pending_slot_plan(
             )
         else:
             patient_name = _build_patient_name(phone, contact_name)
-            if (
-                not patient_name
-                or patient_name == normalize_internal_phone(phone)
-                or patient_name.replace("+", "").isdigit()
-            ):
+            if not _is_valid_booking_name(patient_name):
                 state.plan_name = plan_name
                 state.stage = "awaiting_name_for_slot_confirmation"
                 ConversationStateService.save(phone, state)
@@ -1152,6 +1164,35 @@ async def _handle_offered_slot_selection(
                 }
             )
 
+        if not _is_valid_booking_name(patient_name):
+            state = ConversationStateService.get(phone)
+            state.pending_slot_date = pending_confirmation.date_str
+            state.pending_slot_time = pending_confirmation.time_str
+            state.stage = "awaiting_name_for_slot_confirmation"
+            ConversationStateService.save(phone, state)
+            response_text = (
+                "Perfeito! So preciso do seu nome completo para confirmar a consulta."
+            )
+            delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver name request for confirmation")
+                raise HTTPException(status_code=502, detail="Failed to deliver name request for confirmation")
+
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+
+            return JSONResponse(
+                {
+                    "status": "slot_name_required",
+                    "phone": phone,
+                    "response_preview": response_text[:100],
+                    "selected_time": pending_confirmation.time_str,
+                }
+            )
+
         if state.intent == "reschedule" and not state.reschedule_event_id:
             state.stage = "idle"
             state.pending_slot_date = pending_confirmation.date_str
@@ -1192,6 +1233,36 @@ async def _handle_offered_slot_selection(
                 start_time=datetime.strptime(datetime_str, "%d/%m/%Y %H:%M"),
             )
         except ValueError as exc:
+            # Rede de seguranca: falha por nome ausente nao deve virar "horario indisponivel".
+            if "nome" in str(exc).lower():
+                state = ConversationStateService.get(phone)
+                state.pending_slot_date = pending_confirmation.date_str
+                state.pending_slot_time = pending_confirmation.time_str
+                state.stage = "awaiting_name_for_slot_confirmation"
+                ConversationStateService.save(phone, state)
+                response_text = (
+                    "Perfeito! So preciso do seu nome completo para confirmar a consulta."
+                )
+                logger.info("Confirmacao exige nome do paciente para %s: %s", phone, exc)
+                delivered = await _send_response(phone, response_text)
+                if not delivered:
+                    if message_id:
+                        _mark_message_failed(message_id, phone, "Failed to deliver name request fallback")
+                    raise HTTPException(status_code=502, detail="Failed to deliver name request fallback")
+
+                ConversationService.add_message(phone, "patient", text)
+                ConversationService.add_message(phone, "assistant", response_text)
+                if message_id:
+                    _mark_message_processed(message_id, phone)
+
+                return JSONResponse(
+                    {
+                        "status": "slot_name_required",
+                        "phone": phone,
+                        "response_preview": response_text[:100],
+                        "selected_time": pending_confirmation.time_str,
+                    }
+                )
             response_status = "slot_confirmation_unavailable"
             response_text = (
                 "Esse horario acabou de ficar indisponivel. 😕\n"
