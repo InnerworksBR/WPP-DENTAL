@@ -90,9 +90,6 @@ O projeto agora pode ser publicado direto pelo Git usando o `Dockerfile` da raiz
 - `PORT=3000`
 - `WORKERS=1`
 - `ENABLE_APPOINTMENT_CONFIRMATION_SCHEDULER=1`
-- `CONVERSATION_ENGINE=legacy` por padrao
-- `LANGGRAPH_OPENAI_MODEL=gpt-4o-mini`
-- `LANGGRAPH_FALLBACK_TO_LEGACY=1`
 
 ### Observacoes importantes
 
@@ -100,33 +97,9 @@ O projeto agora pode ser publicado direto pelo Git usando o `Dockerfile` da raiz
 - O cron interno das 20h roda dentro da aplicacao, entao o container precisa permanecer online nesse horario.
 - Se usar mais de um processo ou mais de uma replica, voce corre risco de comportamento concorrente indesejado com SQLite.
 
-## Camada conversacional com LangGraph
+## Camada conversacional
 
-O projeto agora pode usar LangGraph dentro da propria API, sem servico extra e sem licenca separada.
-
-### Como funciona
-
-- `CONVERSATION_ENGINE=legacy`: usa apenas o workflow deterministico atual
-- `CONVERSATION_ENGINE=langgraph`: usa um grafo para rotear perguntas contextuais e reescrever respostas informativas com mais naturalidade
-- em caso de falha do grafo, `LANGGRAPH_FALLBACK_TO_LEGACY=1` faz a API voltar automaticamente para o motor legado
-
-### O que o LangGraph assume agora
-
-- perguntas sobre endereco
-- perguntas sobre convenio
-- perguntas sobre regras operacionais de procedimento
-- mensagens sociais curtas como `obrigado`, `ok`, `valeu`
-
-### O que continua no workflow legado
-
-- agendamento
-- remarcacao
-- cancelamento
-- consulta da proxima consulta
-- confirmacao automatica
-- encaminhamento e estados operacionais sensiveis
-
-Isso deixa a migracao mais segura: o LangGraph melhora a sensibilidade da conversa, mas a parte critica da agenda continua no fluxo que ja conhece calendario, banco e regras da clinica.
+O motor conversacional e o `CleanAgentService` (`src/application/services/clean_agent_service.py`), instanciado como `dental_crew` em `src/interfaces/http/app.py`. E um motor unico e deterministico — sem seletor de engine por variavel de ambiente. Ele combina um workflow deterministico (agendamento, remarcacao, cancelamento, confirmacao proativa) com LangChain/OpenAI para lidar com perguntas fora do fluxo.
 
 ## Deploy na VPS
 

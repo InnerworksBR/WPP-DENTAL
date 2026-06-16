@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from ...domain.policies.phone_service import normalize_internal_phone
+from ...domain.policies.phone_service import canonical_phone, normalize_internal_phone
 
 # Conexoes por thread evitam compartilhar a mesma conexao em requests paralelos.
 _local = threading.local()
@@ -70,6 +70,17 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
     phone TEXT NOT NULL,
     content TEXT NOT NULL,
     message_id TEXT,
+    kind TEXT NOT NULL DEFAULT 'bot',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS pending_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    doctor_phone TEXT NOT NULL,
+    patient_phone TEXT NOT NULL,
+    patient_name TEXT,
+    message TEXT NOT NULL,
+    reason TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -95,10 +106,17 @@ def get_db() -> sqlite3.Connection:
     """Retorna a conexao com o banco de dados da thread atual."""
     if not hasattr(_local, "connection") or _local.connection is None:
         db_path = _get_db_path()
-        _local.connection = sqlite3.connect(db_path)
+        # check_same_thread=True (explicito): cada thread tem sua propria conexao
+        # via threading.local, entao a conexao nunca cruza threads — inclusive nas
+        # threads do executor usadas por asyncio.to_thread no webhook.
+        _local.connection = sqlite3.connect(db_path, check_same_thread=True)
         _local.connection.row_factory = sqlite3.Row
         _local.connection.execute("PRAGMA journal_mode=WAL")
         _local.connection.execute("PRAGMA foreign_keys=ON")
+        # Espera por locks em vez de falhar imediatamente: webhook (event loop),
+        # threads do executor e scheduler async escrevem concorrentemente.
+        busy_timeout_ms = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "5000"))
+        _local.connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     return _local.connection
 
 
@@ -111,43 +129,52 @@ def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: 
 
 
 def _normalize_patient_phone_rows(db: sqlite3.Connection) -> None:
-    """Normaliza pacientes legados para o formato interno sem codigo do pais."""
+    """Normaliza pacientes legados: agrupa por canonical_phone (reconcilia 9o digito)."""
     rows = db.execute(
         "SELECT id, phone, name, plan FROM patients ORDER BY id ASC"
     ).fetchall()
-    grouped_by_phone: dict[str, list[sqlite3.Row]] = {}
+    grouped: dict[str, list] = {}
 
     for row in rows:
-        normalized_phone = normalize_internal_phone(row["phone"])
-        if not normalized_phone:
+        # PH-01: usar canonical_phone para agrupar com/sem 9o digito
+        key = canonical_phone(row["phone"]) or normalize_internal_phone(row["phone"])
+        if not key:
             continue
-        grouped_by_phone.setdefault(normalized_phone, []).append(row)
+        grouped.setdefault(key, []).append(row)
 
-    for normalized_phone, group in grouped_by_phone.items():
-        canonical = next((row for row in group if row["phone"] == normalized_phone), group[0])
-        if canonical["phone"] != normalized_phone:
+    for canon_key, group in grouped.items():
+        # Eleger canônico: preferir o row que já tem o formato canônico
+        canonical_row = next(
+            (r for r in group if r["phone"] == canon_key), group[0]
+        )
+        if canonical_row["phone"] != canon_key:
             db.execute(
                 "UPDATE patients SET phone = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (normalized_phone, canonical["id"]),
+                (canon_key, canonical_row["id"]),
             )
 
-        canonical_plan = canonical["plan"]
+        best_name = canonical_row["name"]
+        best_plan = canonical_row["plan"]
         for row in group:
-            if row["id"] == canonical["id"]:
+            if row["id"] == canonical_row["id"]:
                 continue
-
-            if row["plan"] and not canonical_plan:
-                db.execute(
-                    "UPDATE patients SET plan = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (row["plan"], canonical["id"]),
-                )
-                canonical_plan = row["plan"]
-
+            # Mesclar: pegar melhor nome e plano dos duplicados
+            if row["name"] and not best_name:
+                best_name = row["name"]
+            if row["plan"] and not best_plan:
+                best_plan = row["plan"]
             db.execute(
                 "UPDATE interactions SET patient_id = ? WHERE patient_id = ?",
-                (canonical["id"], row["id"]),
+                (canonical_row["id"], row["id"]),
             )
             db.execute("DELETE FROM patients WHERE id = ?", (row["id"],))
+
+        # Atualizar nome/plano do canônico se melhorou via merge
+        if best_name != canonical_row["name"] or best_plan != canonical_row["plan"]:
+            db.execute(
+                "UPDATE patients SET name = ?, plan = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (best_name or "", best_plan, canonical_row["id"]),
+            )
 
 
 def _run_migrations(db: sqlite3.Connection) -> None:
@@ -155,6 +182,7 @@ def _run_migrations(db: sqlite3.Connection) -> None:
     _ensure_column(db, "processed_messages", "status", "TEXT NOT NULL DEFAULT 'processed'")
     _ensure_column(db, "processed_messages", "last_error", "TEXT")
     _ensure_column(db, "outbound_messages", "message_id", "TEXT")
+    _ensure_column(db, "outbound_messages", "kind", "TEXT NOT NULL DEFAULT 'bot'")
     _normalize_patient_phone_rows(db)
 
 

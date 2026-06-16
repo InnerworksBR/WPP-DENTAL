@@ -1,5 +1,6 @@
 """Tool CrewAI para operacoes com o Google Calendar."""
 
+import logging
 import re
 import unicodedata
 from datetime import datetime, timedelta
@@ -9,7 +10,13 @@ from pydantic import BaseModel, Field
 
 from ...domain.policies.phone_service import normalize_internal_phone
 from ...infrastructure.config.config_service import ConfigService
-from ...infrastructure.integrations.calendar_service import CalendarService, SAO_PAULO_TZ
+from ...infrastructure.integrations.calendar_service import CalendarService, CancelResult, SAO_PAULO_TZ
+
+logger = logging.getLogger("wpp-dental")
+
+_CALENDAR_SAFE_ERROR = (
+    "Erro: nao consegui consultar a agenda agora. Pode tentar novamente em instantes?"
+)
 
 
 _WEEKDAY_NAMES = [
@@ -41,6 +48,21 @@ def _normalize_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", text or "")
     normalized = normalized.encode("ascii", "ignore").decode("ascii").lower()
     return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _compute_earliest_allowed_date(config: ConfigService) -> datetime:
+    """Retorna a data mais proxima permitida para agendamento respeitando dias uteis e feriados."""
+    from ...infrastructure.integrations.calendar_service import CalendarService
+    min_bdays = config.get_min_business_days_ahead()
+    holidays = config.get_holidays()
+    now = datetime.now(SAO_PAULO_TZ)
+    earliest = now.date()
+    counted = 0
+    while counted < min_bdays:
+        earliest += timedelta(days=1)
+        if earliest.weekday() < 5 and not CalendarService._is_holiday(earliest, holidays):
+            counted += 1
+    return datetime.combine(earliest, datetime.min.time()).replace(tzinfo=SAO_PAULO_TZ)
 
 
 def _resolve_date_input(date: str) -> datetime:
@@ -178,8 +200,21 @@ class GetAvailableSlotsTool:
                 "A clinica nao atende aos finais de semana."
             )
 
+        config = ConfigService()
+        earliest_allowed = _compute_earliest_allowed_date(config)
+        if datetime.combine(dt.date(), datetime.min.time()).replace(tzinfo=SAO_PAULO_TZ) < earliest_allowed:
+            min_bdays = config.get_min_business_days_ahead()
+            return (
+                f"Erro: {_date_label(dt)} esta dentro da janela minima de {min_bdays} dias uteis. "
+                "Use 'buscar_proximo_dia_disponivel' para encontrar o primeiro horario disponivel."
+            )
+
         service = CalendarService()
-        slots = service.get_available_slots(dt, period)
+        try:
+            slots = service.get_available_slots(dt, period)
+        except Exception as exc:
+            logger.error("Erro ao buscar horarios em %s: %s", date, exc, exc_info=True)
+            return _CALENDAR_SAFE_ERROR
         slots = _filter_slots(
             slots,
             earliest_time=earliest_time,
@@ -273,14 +308,15 @@ class FindNextAvailableDayTool:
                 weekday_text = _normalize_text(str(weekday))
                 target_weekday = int(weekday_text) if weekday_text.isdigit() else _WEEKDAY_LOOKUP.get(weekday_text)
 
+            holidays = config.get_holidays()
             business_days_counted = 0
             while business_days_counted < min_business_days:
                 target += timedelta(days=1)
-                if target.weekday() < 5:
+                if target.weekday() < 5 and not CalendarService._is_holiday(target.date(), holidays):
                     business_days_counted += 1
 
             for _ in range(max_days_ahead):
-                while target.weekday() >= 5:
+                while target.weekday() >= 5 or CalendarService._is_holiday(target.date(), holidays):
                     target += timedelta(days=1)
                 if target_weekday is not None and target.weekday() != target_weekday:
                     target += timedelta(days=1)
@@ -318,7 +354,8 @@ class FindNextAvailableDayTool:
                 f"nos proximos {max_days_ahead} dias."
             )
         except Exception as exc:
-            return f"Erro ao buscar horarios: {exc}"
+            logger.error("Erro ao buscar proximo dia disponivel: %s", exc, exc_info=True)
+            return _CALENDAR_SAFE_ERROR
 
 
 class CreateAppointmentInput(BaseModel):
@@ -351,7 +388,14 @@ class CreateAppointmentTool:
         try:
             event = service.create_appointment_if_available(patient_name, patient_phone, dt)
         except ValueError as exc:
+            # Regras de negocio (slot ocupado, fora de horario etc.): mensagem segura.
             return f"Erro: {exc}"
+        except Exception as exc:
+            logger.error("Erro ao criar agendamento: %s", exc, exc_info=True)
+            return (
+                "Erro: nao consegui concluir o agendamento agora. "
+                "Pode tentar novamente em instantes?"
+            )
 
         return (
             "Perfeito!\n"
@@ -392,7 +436,11 @@ class CancelAppointmentTool:
         event_id: Optional[str] = None,
     ) -> str:
         service = CalendarService()
-        events = service.find_appointments_by_phone(patient_phone)
+        try:
+            events = service.find_appointments_by_phone(patient_phone)
+        except Exception as exc:
+            logger.error("Erro ao consultar consultas para cancelar: %s", exc, exc_info=True)
+            return _CALENDAR_SAFE_ERROR
 
         if not events:
             return "Nao encontrei nenhuma consulta futura para este paciente."
@@ -401,21 +449,19 @@ class CancelAppointmentTool:
         if event_id:
             event = next((item for item in events if item.get("id") == event_id), None)
             if event is None:
-                return "Erro: nao encontrei esse ID de consulta para este telefone."
+                # CA-07: event_id informado nao pertence aos eventos deste telefone
+                return (
+                    "Nao encontrei essa consulta para este telefone. "
+                    "Use consultar_agendamento para obter o ID correto e tente novamente."
+                )
         else:
-            patient_name_lower = patient_name.lower().strip()
-            named_events = [
-                item for item in events
-                if patient_name_lower and patient_name_lower in item.get("summary", "").lower()
-            ]
-            if len(named_events) == 1:
-                event = named_events[0]
-            elif len(events) == 1:
+            # CA-01: sem event_id, so cancela se houver exatamente 1 consulta futura
+            if len(events) == 1:
                 event = events[0]
             else:
                 return (
-                    "Erro: existe mais de uma consulta futura para este telefone. "
-                    "Use consultar_agendamento e cancele informando o event_id correto."
+                    "Existe mais de uma consulta futura para este telefone. "
+                    "Use consultar_agendamento para obter o event_id correto e cancele informando-o."
                 )
 
         current_event_id = event.get("id")
@@ -429,14 +475,17 @@ class CancelAppointmentTool:
             date_str = "N/A"
             time_str = "N/A"
 
-        success = service.cancel_appointment(current_event_id)
-        if success:
+        result: CancelResult = service.cancel_appointment(current_event_id)
+        if result.cancelled:
             return (
                 "Prontinho!\n"
                 "Consulta cancelada com sucesso.\n"
                 f"Data: {date_str}\n"
                 f"Horario: {time_str}"
             )
+        if result.error:
+            logger.error("CancelAppointmentTool: falha real ao cancelar event_id=%s: %s", current_event_id, result.error)
+            return "Erro ao cancelar a consulta. Por favor, tente novamente em instantes."
         return "Erro ao cancelar a consulta. Tente novamente."
 
 
@@ -459,7 +508,11 @@ class FindAppointmentTool:
 
     def _run(self, patient_phone: str) -> str:
         service = CalendarService()
-        events = service.find_appointments_by_phone(patient_phone)
+        try:
+            events = service.find_appointments_by_phone(patient_phone)
+        except Exception as exc:
+            logger.error("Erro ao consultar agendamentos: %s", exc, exc_info=True)
+            return _CALENDAR_SAFE_ERROR
 
         if not events:
             return "Nao encontrei nenhuma consulta futura para este telefone."

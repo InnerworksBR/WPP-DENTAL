@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import logging
+import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
 from ...infrastructure.persistence.connection import get_db
+
+logger = logging.getLogger("wpp-dental")
 
 
 @dataclass
@@ -41,11 +46,22 @@ class ConversationStateService:
 
     @staticmethod
     def get(phone: str) -> ConversationState:
-        db = get_db()
-        row = db.execute(
-            "SELECT state_json FROM conversation_state WHERE phone = ?",
-            (phone,),
-        ).fetchone()
+        try:
+            db = get_db()
+            row = db.execute(
+                "SELECT state_json FROM conversation_state WHERE phone = ?",
+                (phone,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            # Erro de I/O do SQLite (lock/busy): degrada para estado padrao em vez
+            # de propagar 500 pelo caminho do webhook (WE-10).
+            logger.error(
+                "Falha ao ler estado da conversa de %s; usando estado padrao: %s",
+                phone,
+                exc,
+                exc_info=True,
+            )
+            return ConversationState()
         if row is None or not row["state_json"]:
             return ConversationState()
 
@@ -61,7 +77,22 @@ class ConversationStateService:
         if not isinstance(metadata, dict):
             payload["metadata"] = {}
 
-        return ConversationState(**payload)
+        # CO-01: ignorar campos desconhecidos para sobreviver a schema drift
+        valid_fields = {f.name for f in dataclasses.fields(ConversationState)}
+        filtered = {k: v for k, v in payload.items() if k in valid_fields}
+        state = ConversationState(**filtered)
+
+        # CO-02: garantir que campos list nunca chegam como None
+        for list_field in ("offered_times", "rejected_slots", "excluded_dates"):
+            if not isinstance(getattr(state, list_field), list):
+                setattr(state, list_field, [])
+
+        # CO-02: garantir que campos str nunca chegam como None
+        for f in dataclasses.fields(ConversationState):
+            if isinstance(f.default, str) and getattr(state, f.name) is None:
+                setattr(state, f.name, f.default)
+
+        return state
 
     @staticmethod
     def save(phone: str, state: ConversationState) -> None:

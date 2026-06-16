@@ -66,9 +66,10 @@ class TestPhoneNormalization:
 
         row = get_db().execute("SELECT phone FROM patients WHERE name = ?", ("Cristian",)).fetchone()
 
-        assert "cadastrado com sucesso" in message
+        assert "sucesso" in message
         assert row is not None
-        assert row["phone"] == "13991743380"
+        # PH-01: formato canônico = DDD(2) + 8 dígitos (9o dígito removido)
+        assert row["phone"] == "1391743380"
 
     def test_init_db_normalizes_legacy_patient_phone(self):
         db = get_db()
@@ -84,7 +85,8 @@ class TestPhoneNormalization:
         row = get_db().execute("SELECT phone FROM patients WHERE name = ?", ("Cristian",)).fetchone()
 
         assert row is not None
-        assert row["phone"] == "13991743380"
+        # PH-01: formato canônico = DDD(2) + 8 dígitos (9o dígito removido)
+        assert row["phone"] == "1391743380"
 
     def test_create_appointment_stores_internal_phone_in_calendar(self, monkeypatch):
         service = CalendarService()

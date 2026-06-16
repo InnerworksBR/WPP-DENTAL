@@ -18,13 +18,6 @@ _COLORS = {
     "CRITICAL": "\033[1;31m", # vermelho negrito
 }
 
-# Cores para destacar partes da mensagem
-_ENGINE_COLORS = {
-    "agent":    "\033[1;35m",  # roxo negrito
-    "langgraph": "\033[1;36m", # ciano negrito
-    "legacy":   "\033[1;33m",  # amarelo negrito
-}
-
 # Loggers ruidosos que não agregam valor no dia a dia
 _NOISY_LOGGERS = [
     "httpx",
@@ -33,7 +26,6 @@ _NOISY_LOGGERS = [
     "langchain",
     "langchain_core",
     "langchain_openai",
-    "langgraph",
     "googleapiclient",
     "google",
     "urllib3",
@@ -41,19 +33,8 @@ _NOISY_LOGGERS = [
 ]
 
 
-def _colorize_message(msg: str, use_color: bool) -> str:
-    """Destaca tags de engine e prefixos de erro na mensagem."""
-    if not use_color:
-        return msg
-    for engine, color in _ENGINE_COLORS.items():
-        tag = f"[ENGINE={engine}]"
-        if tag in msg:
-            msg = msg.replace(tag, f"{color}{tag}{_RESET}")
-    return msg
-
-
 class ColoredFormatter(logging.Formatter):
-    """Formatter com cores ANSI e destaque de engines."""
+    """Formatter com cores ANSI."""
 
     def __init__(self, use_color: bool = True) -> None:
         super().__init__()
@@ -66,21 +47,15 @@ class ColoredFormatter(logging.Formatter):
         dim = _DIM if self.use_color else ""
         bold = _BOLD if self.use_color else ""
 
-        # Tempo
         time_str = self.formatTime(record, "%H:%M:%S")
 
-        # Nome do logger — pega só a última parte para economizar espaço
         name = record.name
         short_name = name.split(".")[-1] if "." in name else name
 
-        # Nível formatado com cor e tamanho fixo
         level_str = f"{color}{bold}{level:<8}{reset}"
 
-        # Mensagem com destaque de engines
         message = record.getMessage()
-        message = _colorize_message(message, self.use_color)
 
-        # Exceção, se houver
         exc_text = ""
         if record.exc_info:
             exc_text = "\n" + self.formatException(record.exc_info)

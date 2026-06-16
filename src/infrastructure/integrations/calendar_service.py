@@ -7,19 +7,34 @@ import logging
 import os
 import threading
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-from ...domain.policies.phone_service import build_phone_search_term, normalize_internal_phone
+from ...domain.policies.phone_service import (
+    build_phone_search_term,
+    normalize_internal_phone,
+    phones_match,
+)
 from ..config.config_service import ConfigService
 
 SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
 _APPOINTMENT_CREATION_LOCK = threading.Lock()
 logger = logging.getLogger("wpp-dental")
+
+
+@dataclass
+class CancelResult:
+    """Resultado tipado de cancel_appointment: distingue sucesso/idempotente de erro real."""
+
+    cancelled: bool
+    already_absent: bool
+    error: Optional[str]
 
 
 class CalendarService:
@@ -168,8 +183,30 @@ class CalendarService:
     def _normalize_datetime(value: datetime) -> datetime:
         """Normaliza datetimes para o timezone de Sao Paulo."""
         if value.tzinfo is None:
-            return value.replace(tzinfo=SAO_PAULO_TZ)
+            # Naive datetime: assume local São Paulo time. fold=0 selects first occurrence
+            # during DST overlap (CA-09).
+            return value.replace(tzinfo=SAO_PAULO_TZ, fold=0)
         return value.astimezone(SAO_PAULO_TZ)
+
+    @staticmethod
+    def _is_holiday(date_obj: Any, holidays: list[str]) -> bool:
+        """Retorna True se a data e um feriado configurado (CA-03)."""
+        for h in holidays:
+            parts = h.split("/")
+            try:
+                if len(parts) == 2:
+                    if date_obj.day == int(parts[0]) and date_obj.month == int(parts[1]):
+                        return True
+                elif len(parts) == 3:
+                    if (
+                        date_obj.day == int(parts[0])
+                        and date_obj.month == int(parts[1])
+                        and date_obj.year == int(parts[2])
+                    ):
+                        return True
+            except (ValueError, IndexError, AttributeError):
+                continue
+        return False
 
     @staticmethod
     def _normalize_phone(phone: str) -> str:
@@ -365,6 +402,16 @@ class CalendarService:
         if not event_id:
             return False
         service = self._get_service()
+        try:
+            event = service.events().get(calendarId=self.calendar_id, eventId=event_id).execute()
+        except Exception:
+            return False
+        if not self.event_is_day_block(event):
+            logger.warning(
+                "delete_day_block: event_id=%s nao e um bloqueio — exclusao recusada",
+                event_id,
+            )
+            return False
         service.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()
         return True
 
@@ -399,6 +446,8 @@ class CalendarService:
         events = self.get_events(date, period_start, period_end)
         busy_intervals = []
         for event in events:
+            if str(event.get("status", "")).lower() == "cancelled":
+                continue
             start_str = event.get("start", {}).get("dateTime")
             end_str = event.get("end", {}).get("dateTime")
 
@@ -445,6 +494,8 @@ class CalendarService:
         events = self.get_events(start_time, start_time.time(), end_time.time())
 
         for event in events:
+            if str(event.get("status", "")).lower() == "cancelled":
+                continue
             start_str = event.get("start", {}).get("dateTime")
             end_str = event.get("end", {}).get("dateTime")
 
@@ -521,19 +572,79 @@ class CalendarService:
                 f"O agendamento so pode ser feito ate {self.config.get_max_days_ahead()} dias a frente."
             )
 
+        # WE-05/CA-02: enforce minimum business days window (source of truth)
+        min_bdays = self.config.get_min_business_days_ahead()
+        holidays = self.config.get_holidays()
+        earliest_allowed = now_sp.date()
+        bdays_counted = 0
+        while bdays_counted < min_bdays:
+            earliest_allowed += timedelta(days=1)
+            if earliest_allowed.weekday() < 5 and not self._is_holiday(earliest_allowed, holidays):
+                bdays_counted += 1
+        if start_sp.date() < earliest_allowed:
+            raise ValueError(
+                f"O agendamento so pode ser feito a partir de {min_bdays} dias uteis."
+            )
+
         with _APPOINTMENT_CREATION_LOCK:
+            # Idempotencia por (telefone, slot): reutiliza evento existente em reentregas
+            try:
+                existing = self.find_appointments_by_phone(patient_phone)
+                for evt in existing:
+                    start_str = evt.get("start", {}).get("dateTime", "")
+                    if start_str:
+                        evt_start = self._normalize_datetime(
+                            datetime.fromisoformat(start_str)
+                        )
+                        if evt_start == start_sp:
+                            logger.info(
+                                "create_appointment_if_available: evento existente reutilizado "
+                                "phone=%s slot=%s event_id=%s",
+                                patient_phone,
+                                start_sp.isoformat(),
+                                evt.get("id"),
+                            )
+                            return evt
+            except Exception as exc:
+                logger.warning(
+                    "create_appointment_if_available: erro na verificacao de idempotencia "
+                    "(prosseguindo com criacao normal): %s",
+                    exc,
+                )
+
             if self._slot_conflicts(start_sp, end_sp):
                 raise ValueError(
                     f"O horario {start_sp.strftime('%d/%m/%Y %H:%M')} nao esta mais disponivel."
                 )
             return self.create_appointment(patient_name, patient_phone, start_sp)
 
-    def cancel_appointment(self, event_id: str) -> bool:
-        """Cancela um evento do Google Calendar."""
+    def cancel_appointment(self, event_id: str) -> CancelResult:
+        """Cancela um evento do Google Calendar.
+
+        Retorna CancelResult:
+        - cancelled=True, already_absent=False -> 2xx (sucesso real)
+        - cancelled=True, already_absent=True  -> 404/410 (ja inexistente, idempotente)
+        - cancelled=False, error=<msg>          -> falha real (rede/auth/5xx)
+        - event_id vazio                        -> cancelled=False sem chamar a API
+        """
+        if not event_id:
+            return CancelResult(cancelled=False, already_absent=False, error="event_id ausente")
         try:
             service = self._get_service()
             service.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()
-            return True
+            return CancelResult(cancelled=True, already_absent=False, error=None)
+        except HttpError as exc:
+            status = getattr(exc, "resp", None)
+            status_code = int(status.status) if status and hasattr(status, "status") else None
+            if status_code in (404, 410):
+                return CancelResult(cancelled=True, already_absent=True, error=None)
+            logger.error(
+                "Falha ao cancelar evento no Google Calendar: event_id=%s: %s",
+                event_id,
+                exc,
+                exc_info=True,
+            )
+            return CancelResult(cancelled=False, already_absent=False, error=str(exc))
         except Exception as exc:
             logger.error(
                 "Falha ao cancelar evento no Google Calendar: event_id=%s: %s",
@@ -541,7 +652,7 @@ class CalendarService:
                 exc,
                 exc_info=True,
             )
-            return False
+            return CancelResult(cancelled=False, already_absent=False, error=str(exc))
 
     def find_appointment_by_patient(self, patient_name: str, patient_phone: str) -> Optional[dict]:
         """Busca a proxima consulta de um paciente pelo nome e telefone."""
@@ -614,14 +725,13 @@ class CalendarService:
 
         matched_events = []
         for event in events_result.get("items", []):
+            if str(event.get("status", "")).lower() == "cancelled":
+                continue
             summary_digits = self._normalize_phone(event.get("summary", ""))
             if not search_term:
                 continue
-            if (
-                summary_digits == phone_digits
-                or summary_digits.endswith(search_term)
-                or phone_digits.endswith(summary_digits)
-            ):
+            # PH-03: comparar por forma canonica para evitar casamento cruzado via endswith
+            if phones_match(summary_digits, phone_digits) or summary_digits == phone_digits:
                 matched_events.append(event)
 
         return matched_events

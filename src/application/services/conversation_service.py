@@ -20,10 +20,8 @@ class ConversationService:
         "agendamento confirmado",
         "cancelada com sucesso",
         "consulta cancelada com sucesso",
-        "se precisar de mais alguma coisa",
-        "caso precise remarcar ou cancelar",
-        "estou a disposicao",
-        "posso ajudar com mais alguma coisa",
+        # WE-11: "estou a disposicao" / "posso ajudar com mais alguma coisa" removed —
+        # too ambiguous; appear in intermediate responses and derail pending offers.
         "vou encaminhar para a",
         "entrara em contato com voce em breve",
         "sera notificada e entrara em contato",
@@ -105,8 +103,13 @@ class ConversationService:
         )
 
     @staticmethod
-    def reset_context_if_finished(phone: str) -> bool:
-        """Limpa o contexto quando o ultimo atendimento ja foi concluido."""
+    def reset_context_if_finished(phone: str, has_pending_agenda: bool = False) -> bool:
+        """Limpa o contexto quando o ultimo atendimento ja foi concluido.
+
+        has_pending_agenda: quando True (oferta/confirmacao pendente), aborta o reset (WE-11).
+        """
+        if has_pending_agenda:
+            return False
         last_message = ConversationService.last_message(phone)
         if not last_message or last_message.get("role") != "assistant":
             return False

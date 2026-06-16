@@ -1,6 +1,8 @@
 """Serviço de integração com a Evolution API (WhatsApp)."""
 
+import asyncio
 import os
+import time
 import logging
 
 import httpx
@@ -8,6 +10,8 @@ import httpx
 from ..persistence.outbound_message_store import OutboundMessageStore
 
 logger = logging.getLogger(__name__)
+
+_WHATSAPP_SEND_RETRIES = int(os.getenv("WHATSAPP_SEND_RETRIES", "2"))
 
 
 class WhatsAppService:
@@ -27,10 +31,9 @@ class WhatsAppService:
 
     def _format_phone(self, phone: str) -> str:
         """
-        Formata o telefone para o padrão Evolution API.
-        Remove caracteres especiais e garante formato correto.
+        Formata e valida o telefone para o padrão Evolution API.
+        Rejeita números com DDD inválido ou tamanho incorreto.
         """
-        # Remove tudo que não é dígito
         if "@lid" in str(phone or "").lower():
             return ""
 
@@ -38,9 +41,22 @@ class WhatsAppService:
         if not digits:
             return ""
 
-        # Se não começa com 55 (Brasil), adiciona
         if not digits.startswith("55"):
             digits = "55" + digits
+
+        # Telefones válidos: 55 + DDD(2) + número(8 ou 9) = 12 ou 13 dígitos
+        if len(digits) not in (12, 13):
+            logger.warning(
+                "Telefone com tamanho invalido apos formatacao (%d digitos): %s",
+                len(digits),
+                digits,
+            )
+            return ""
+
+        ddd = int(digits[2:4])
+        if ddd < 11 or ddd > 99:
+            logger.warning("DDD invalido: %s (telefone: %s)", ddd, digits)
+            return ""
 
         return digits
 
@@ -58,13 +74,14 @@ class WhatsAppService:
             return str(key["id"])
         return str(payload.get("id", ""))
 
-    async def send_message(self, phone: str, message: str) -> bool:
+    async def send_message(self, phone: str, message: str, kind: str = "bot") -> bool:
         """
-        Envia uma mensagem de texto via WhatsApp.
+        Envia uma mensagem de texto via WhatsApp com retry exponencial.
 
         Args:
             phone: Número do destinatário
             message: Texto da mensagem
+            kind: Tipo de mensagem ('bot' ou 'doctor_alert')
 
         Returns:
             True se enviada com sucesso
@@ -75,34 +92,56 @@ class WhatsAppService:
             return False
 
         url = f"{self.base_url.rstrip('/')}/message/sendText/{self.instance}"
+        payload = {"number": formatted_phone, "text": message}
+        retries = int(os.getenv("WHATSAPP_SEND_RETRIES", "2"))
 
-        payload = {
-            "number": formatted_phone,
-            "text": message,
-        }
+        for attempt in range(retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    response = await client.post(
+                        url, json=payload, headers=self._get_headers()
+                    )
+                    response.raise_for_status()
+                    try:
+                        OutboundMessageStore.record(
+                            formatted_phone,
+                            message,
+                            self._extract_message_id(response),
+                            kind=kind,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Falha ao registrar mensagem enviada (entrega ja concluida): %s",
+                            exc,
+                            exc_info=True,
+                        )
+                    logger.info("Mensagem enviada para %s", formatted_phone)
+                    return True
+            except httpx.HTTPError as e:
+                if attempt < retries:
+                    logger.warning(
+                        "Tentativa %d/%d falhou para %s: %s — aguardando %ds",
+                        attempt + 1,
+                        retries + 1,
+                        formatted_phone,
+                        e,
+                        2 ** attempt,
+                    )
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    logger.error(
+                        "Erro ao enviar mensagem para %s apos %d tentativas: %s",
+                        formatted_phone,
+                        retries + 1,
+                        e,
+                    )
+                    return False
 
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(
-                    url,
-                    json=payload,
-                    headers=self._get_headers(),
-                )
-                response.raise_for_status()
-                OutboundMessageStore.record(
-                    formatted_phone,
-                    message,
-                    self._extract_message_id(response),
-                )
-                logger.info(f"Mensagem enviada para {formatted_phone}")
-                return True
-        except httpx.HTTPError as e:
-            logger.error(f"Erro ao enviar mensagem para {formatted_phone}: {e}")
-            return False
+        return False
 
-    def send_message_sync(self, phone: str, message: str) -> bool:
+    def send_message_sync(self, phone: str, message: str, kind: str = "bot") -> bool:
         """
-        Versão síncrona do envio de mensagem (para uso em tools CrewAI).
+        Versão síncrona do envio de mensagem com retry exponencial (para uso em tools CrewAI).
         """
         formatted_phone = self._format_phone(phone)
         if not formatted_phone:
@@ -110,27 +149,49 @@ class WhatsAppService:
             return False
 
         url = f"{self.base_url.rstrip('/')}/message/sendText/{self.instance}"
+        payload = {"number": formatted_phone, "text": message}
+        retries = int(os.getenv("WHATSAPP_SEND_RETRIES", "2"))
 
-        payload = {
-            "number": formatted_phone,
-            "text": message,
-        }
+        for attempt in range(retries + 1):
+            try:
+                with httpx.Client(timeout=30) as client:
+                    response = client.post(
+                        url, json=payload, headers=self._get_headers()
+                    )
+                    response.raise_for_status()
+                    try:
+                        OutboundMessageStore.record(
+                            formatted_phone,
+                            message,
+                            self._extract_message_id(response),
+                            kind=kind,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Falha ao registrar mensagem enviada (entrega ja concluida): %s",
+                            exc,
+                            exc_info=True,
+                        )
+                    logger.info("Mensagem enviada para %s", formatted_phone)
+                    return True
+            except httpx.HTTPError as e:
+                if attempt < retries:
+                    logger.warning(
+                        "Tentativa %d/%d falhou para %s: %s — aguardando %ds",
+                        attempt + 1,
+                        retries + 1,
+                        formatted_phone,
+                        e,
+                        2 ** attempt,
+                    )
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error(
+                        "Erro ao enviar mensagem para %s apos %d tentativas: %s",
+                        formatted_phone,
+                        retries + 1,
+                        e,
+                    )
+                    return False
 
-        try:
-            with httpx.Client(timeout=30) as client:
-                response = client.post(
-                    url,
-                    json=payload,
-                    headers=self._get_headers(),
-                )
-                response.raise_for_status()
-                OutboundMessageStore.record(
-                    formatted_phone,
-                    message,
-                    self._extract_message_id(response),
-                )
-                logger.info(f"Mensagem enviada para {formatted_phone}")
-                return True
-        except httpx.HTTPError as e:
-            logger.error(f"Erro ao enviar mensagem para {formatted_phone}: {e}")
-            return False
+        return False

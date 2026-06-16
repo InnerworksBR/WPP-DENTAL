@@ -1,6 +1,8 @@
 """Serviço de leitura de configurações YAML."""
 
+import logging
 import os
+import threading
 from difflib import SequenceMatcher, get_close_matches
 import re
 import unicodedata
@@ -8,12 +10,15 @@ import yaml
 from pathlib import Path
 from typing import Any, Optional
 
+logger = logging.getLogger("wpp-dental")
+
 
 class ConfigService:
     """Lê e fornece acesso às configurações do sistema."""
 
     _instance: Optional["ConfigService"] = None
     _configs: dict[str, Any] = {}
+    _instance_lock = threading.Lock()
     _PRIVATE_PLAN_ALIASES = {
         "particular",
         "consulta particular",
@@ -31,8 +36,10 @@ class ConfigService:
 
     def __new__(cls) -> "ConfigService":
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._load_configs()
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._load_configs()
         return cls._instance
 
     @staticmethod
@@ -74,10 +81,16 @@ class ConfigService:
         return None
 
     def _resolve_env_vars(self, value: Any) -> Any:
-        """Resolve variáveis de ambiente no formato ${VAR_NAME}."""
-        if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
-            env_var = value[2:-1]
-            return os.getenv(env_var, value)
+        """Resolve variaveis de ambiente no formato ${VAR_NAME} em qualquer posicao da string."""
+        if isinstance(value, str):
+            def _replace(match: re.Match) -> str:
+                var = match.group(1)
+                result = os.getenv(var)
+                if result is None:
+                    logger.warning("Variavel de ambiente nao definida: %s", var)
+                    return ""
+                return result
+            return re.sub(r"\$\{([^}]+)\}", _replace, value)
         if isinstance(value, dict):
             return {k: self._resolve_env_vars(v) for k, v in value.items()}
         if isinstance(value, list):
@@ -85,18 +98,36 @@ class ConfigService:
         return value
 
     def _load_configs(self) -> None:
-        """Carrega todos os arquivos YAML da pasta config/."""
+        """Carrega todos os arquivos YAML da pasta config/ de forma atomica e resiliente."""
         config_dir = Path(__file__).parent.parent.parent.parent / "config"
+        new_configs: dict[str, Any] = {}
         for yaml_file in config_dir.glob("*.yaml"):
-            key = yaml_file.stem  # plans, settings, messages
-            with open(yaml_file, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-                self._configs[key] = self._resolve_env_vars(data)
+            key = yaml_file.stem
+            try:
+                with open(yaml_file, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                new_configs[key] = self._resolve_env_vars(data)
+            except (yaml.YAMLError, OSError) as exc:
+                logger.error(
+                    "Falha ao carregar config '%s': %s — usando {} para esta chave",
+                    yaml_file.name,
+                    exc,
+                )
+                new_configs[key] = {}
+        self._configs = new_configs
 
     def reload(self) -> None:
-        """Recarrega as configurações (hot reload)."""
-        self._configs.clear()
-        self._load_configs()
+        """Recarrega as configuracoes (hot reload), preservando a config anterior em caso de falha total."""
+        previous = dict(self._configs)
+        try:
+            self._load_configs()
+        except Exception as exc:
+            logger.error(
+                "reload() falhou completamente: %s — mantendo config anterior",
+                exc,
+                exc_info=True,
+            )
+            self._configs = previous
 
     def get_settings(self) -> dict[str, Any]:
         """Retorna as configurações gerais."""
@@ -264,26 +295,42 @@ class ConfigService:
         """
         Retorna um template de mensagem formatado.
         path: chave pontilhada, ex: 'greeting.new_patient'
-        kwargs: variáveis para interpolação
+        kwargs: variaveis para interpolacao
         """
         messages = self._configs.get("messages", {})
         keys = path.split(".")
         value = messages
         for key in keys:
             if isinstance(value, dict):
-                value = value.get(key, "")
+                value = value.get(key)
+                if value is None:
+                    logger.warning("Chave de mensagem ausente: '%s'", path)
+                    return self._get_fallback_message(**kwargs)
             else:
-                return ""
+                logger.warning("Chave de mensagem ausente (intermediaria nao e dict): '%s'", path)
+                return self._get_fallback_message(**kwargs)
         if isinstance(value, str):
             try:
                 return value.strip().format(**kwargs)
             except KeyError:
                 return value.strip()
-        return str(value)
+        logger.warning("Chave de mensagem ausente ou nao-string: '%s'", path)
+        return self._get_fallback_message(**kwargs)
+
+    def _get_fallback_message(self, **kwargs: Any) -> str:
+        """Retorna uma mensagem de fallback generica nao-vazia."""
+        messages = self._configs.get("messages", {})
+        fallback = messages.get("errors", {}).get("general", "")
+        if isinstance(fallback, str) and fallback.strip():
+            try:
+                return fallback.strip().format(**kwargs)
+            except (KeyError, ValueError):
+                return fallback.strip()
+        return "Desculpe, ocorreu um erro interno. Por favor, tente novamente."
 
     def get_doctor_name(self) -> str:
         """Retorna o nome da doutora."""
-        return self.get_settings().get("doctor", {}).get("name", "Dra.")
+        return self.get_settings().get("doctor", {}).get("name", "Dra. Priscila")
 
     def get_doctor_phone(self) -> str:
         """Retorna o telefone da doutora para alertas."""
@@ -299,9 +346,10 @@ class ConfigService:
     def get_calendar_id(self) -> str:
         """Retorna o ID do Google Calendar."""
         cal_id = self.get_settings().get("doctor", {}).get("calendar_id", "primary")
+        cal_id = str(cal_id) if cal_id is not None else "primary"
         if cal_id.startswith("${"):
             cal_id = os.getenv("GOOGLE_CALENDAR_ID", "primary")
-        return cal_id
+        return cal_id or "primary"
 
     def get_periods(self) -> dict[str, dict[str, str]]:
         """Retorna os períodos do dia configurados."""
@@ -326,6 +374,32 @@ class ConfigService:
     def get_min_business_days_ahead(self) -> int:
         """Retorna a janela minima de dias uteis antes do primeiro horario sugerido."""
         return self.get_settings().get("scheduling", {}).get("min_business_days_ahead", 2)
+
+    def get_holidays(self) -> list[str]:
+        """Retorna feriados configurados como lista de 'DD/MM' ou 'DD/MM/YYYY'."""
+        raw = self.get_settings().get("scheduling", {}).get("holidays", [])
+        result = []
+        for entry in (raw if isinstance(raw, list) else []):
+            s = str(entry).strip()
+            parts = s.split("/")
+            try:
+                if len(parts) == 2:
+                    day, month = int(parts[0]), int(parts[1])
+                    if 1 <= day <= 31 and 1 <= month <= 12:
+                        result.append(f"{day:02d}/{month:02d}")
+                    else:
+                        raise ValueError
+                elif len(parts) == 3:
+                    day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+                    if 1 <= day <= 31 and 1 <= month <= 12:
+                        result.append(f"{day:02d}/{month:02d}/{year}")
+                    else:
+                        raise ValueError
+                else:
+                    raise ValueError
+            except (ValueError, IndexError):
+                logger.warning("Feriado invalido ignorado: %r", s)
+        return result
 
     def get_openai_model(self) -> str:
         """Retorna o modelo OpenAI configurado."""

@@ -1,6 +1,7 @@
 """Servidor webhook principal do WPP-DENTAL."""
 
 import asyncio
+import dataclasses
 import hmac
 import logging
 import os
@@ -19,7 +20,10 @@ from .admin import router as admin_router
 from ...application.services.clean_agent_service import CleanAgentService
 from ...application.services.appointment_confirmation_service import AppointmentConfirmationService
 from ...application.services.conversation_service import ConversationService
-from ...application.services.conversation_state_service import ConversationStateService
+from ...application.services.conversation_state_service import (
+    ConversationState,
+    ConversationStateService,
+)
 from ...application.services.handoff_service import HandoffService
 from ...application.services.patient_service import PatientService
 from ...domain.policies.appointment_offer_service import (
@@ -29,7 +33,7 @@ from ...domain.policies.appointment_offer_service import (
 from ...domain.policies.phone_service import normalize_conversation_phone, normalize_internal_phone
 from ...domain.policies.scope_guard_service import ScopeGuardService
 from ...infrastructure.config.config_service import ConfigService
-from ...infrastructure.integrations.calendar_service import CalendarService
+from ...infrastructure.integrations.calendar_service import CalendarService, CancelResult
 from ...infrastructure.persistence import OutboundMessageStore
 from ...infrastructure.persistence.connection import close_db, get_db, init_db
 
@@ -38,7 +42,37 @@ from ...infrastructure.logging_config import setup_logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("wpp-dental")
 _webhook_auth_warning_logged = False
-_webhook_auth_mismatch_warning_logged = False
+
+
+def _redact_phone(phone: str) -> str:
+    """Retorna telefone com todos os digitos mascarados exceto os ultimos 4."""
+    digits = "".join(c for c in (phone or "") if c.isdigit())
+    if len(digits) <= 4:
+        return "****"
+    return "*" * (len(digits) - 4) + digits[-4:]
+
+
+_HANDOFF_MARKERS = (
+    "vou encaminhar para",
+    "entrara em contato",
+    "sera notificada",
+    "vou encaminhar",
+    "vai conferir e te orientar",
+)
+_HANDOFF_NEG_PREFIXES = ("nao vou", "nao vai", "nao vamos", "nunca ", "sem ", "nao ")
+_HANDOFF_NEG_WINDOW = 30
+
+
+def _response_triggers_handoff(normalized_resp: str) -> bool:
+    """WE-13: retorna True somente se a resposta contem marcador de handoff sem negacao proxima."""
+    for marker in _HANDOFF_MARKERS:
+        idx = normalized_resp.find(marker)
+        if idx == -1:
+            continue
+        window = normalized_resp[max(0, idx - _HANDOFF_NEG_WINDOW): idx]
+        if not any(neg in window for neg in _HANDOFF_NEG_PREFIXES):
+            return True
+    return False
 
 
 async def _run_appointment_confirmation_scheduler() -> None:
@@ -79,8 +113,22 @@ async def lifespan(app: FastAPI):
     logger.info("Doutora: %s", config.get_doctor_name())
     logger.info("Planos ativos: %s", ", ".join(config.get_plan_names()))
     logger.info("Modelo LLM: %s", config.get_openai_model())
+    _doctor_phone = config.get_doctor_phone()
+    if not _doctor_phone:
+        logger.critical(
+            "DOCTOR_PHONE nao configurado ou invalido — alertas para a doutora serao silenciosamente "
+            "descartados. Configure a variavel de ambiente DOCTOR_PHONE ou o campo "
+            "settings.doctor.phone no config.yaml."
+        )
     scheduler_task = None
     if AppointmentConfirmationService.scheduler_enabled():
+        # CO-04: catch-up — enviar lembretes perdidos por restart ou queda
+        try:
+            _catchup_stats = await AppointmentConfirmationService().run_catchup_if_missed()
+            if _catchup_stats is not None:
+                logger.info("Catch-up de confirmacoes executado no startup: %s", _catchup_stats)
+        except Exception as _catchup_exc:
+            logger.error("Falha no catch-up de confirmacoes no startup: %s", _catchup_exc, exc_info=True)
         scheduler_task = asyncio.create_task(_run_appointment_confirmation_scheduler())
         app.state.appointment_confirmation_scheduler = scheduler_task
         logger.info(
@@ -114,6 +162,19 @@ app.include_router(admin_router)
 dental_crew = CleanAgentService()
 
 
+def _process_message_in_worker(**kwargs) -> str:
+    """Executa o motor de conversa em thread separada (libera o event loop).
+
+    Fecha a conexao SQLite por-thread ao final para nao reter o arquivo de banco
+    em threads de longa duracao do executor (importante sob troca de DATABASE_PATH
+    e em ambientes Windows que travam o arquivo enquanto a conexao esta aberta).
+    """
+    try:
+        return dental_crew.process_message(**kwargs)
+    finally:
+        close_db()
+
+
 @app.get("/")
 async def root_check():
     """Endpoint raiz para health checks mais simples de plataforma."""
@@ -139,9 +200,8 @@ async def receive_message(request: Request):
         payload,
         require_key=False,
         include_evolution_fallback=True,
-        allow_unauthorized=True,
     )
-    logger.debug("Webhook recebido: %s", payload)
+    logger.debug("Webhook recebido: event=%s from=%s", payload.get("event"), payload.get("instance"))
 
     event = payload.get("event", "")
     if event not in ("messages.upsert", "MESSAGES_UPSERT", "messages"):
@@ -176,7 +236,7 @@ async def receive_message(request: Request):
             message_id=message_id,
         )
 
-    logger.info("Mensagem de %s (%s): %s...", phone, contact_name, text[:50])
+    logger.info("Mensagem de %s (***): %s...", _redact_phone(phone), text[:20])
 
     if HandoffService.is_active(phone):
         expires_at = HandoffService.get_expires_at(phone)
@@ -185,6 +245,8 @@ async def receive_message(request: Request):
             phone,
             expires_at.isoformat(timespec="seconds") if expires_at else "desconhecido",
         )
+        # HO-02: estender a janela a cada mensagem do paciente, ate o teto maximo
+        HandoffService.extend(phone)
         ConversationService.add_message(phone, "patient", text)
         if message_id:
             _mark_message_processed(message_id, phone)
@@ -198,10 +260,38 @@ async def receive_message(request: Request):
             }
         )
 
-    if ConversationService.reset_context_if_finished(phone):
+    _pre_state = ConversationStateService.get(phone)
+    _has_pending_agenda = bool(
+        getattr(_pre_state, "pending_slot_date", "")
+        or getattr(_pre_state, "pending_slot_time", "")
+        or getattr(_pre_state, "intent", "") == "reschedule"
+    )
+    if ConversationService.reset_context_if_finished(phone, has_pending_agenda=_has_pending_agenda):
         ConversationStateService.clear(phone)
 
-    current_state = ConversationStateService.get(phone)
+    try:
+        current_state = ConversationStateService.get(phone)
+    except Exception as exc:
+        logger.error(
+            "Falha ao ler estado da conversa de %s; usando estado padrao: %s",
+            phone,
+            exc,
+            exc_info=True,
+        )
+        current_state = ConversationState()
+
+    # CO-07: TTL de 60 min para stages awaiting_* — evita conversas presas para sempre
+    if current_state.stage.startswith("awaiting_"):
+        last_updated = ConversationStateService.get_updated_at(phone)
+        if last_updated and (datetime.utcnow() - last_updated) > timedelta(minutes=60):
+            logger.info(
+                "TTL expirado para %s (stage=%s, updated_at=%s); resetando para idle",
+                phone,
+                current_state.stage,
+                last_updated.isoformat(),
+            )
+            current_state = _reset_to_idle(current_state)
+            ConversationStateService.save(phone, current_state)
 
     escalation_response = await _handle_scope_escalation(
         phone=phone,
@@ -211,6 +301,16 @@ async def receive_message(request: Request):
     )
     if escalation_response is not None:
         return escalation_response
+
+    if current_state.stage == "awaiting_name_for_slot_confirmation":
+        name_response = await _handle_pending_slot_name(
+            phone=phone,
+            text=text,
+            contact_name=contact_name,
+            message_id=message_id,
+        )
+        if name_response is not None:
+            return name_response
 
     if current_state.stage == "awaiting_plan_for_slot_confirmation":
         plan_response = await _handle_pending_slot_plan(
@@ -222,7 +322,10 @@ async def receive_message(request: Request):
         if plan_response is not None:
             return plan_response
 
-    if current_state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
+    if current_state.stage in {
+        AppointmentConfirmationService.CONFIRMATION_STAGE,
+        "awaiting_cancel_confirmation",
+    }:
         confirmation_response = await _handle_appointment_confirmation(
             phone=phone,
             text=text,
@@ -254,7 +357,8 @@ async def receive_message(request: Request):
 
     try:
         response_text = str(
-            dental_crew.process_message(
+            await asyncio.to_thread(
+                _process_message_in_worker,
                 patient_phone=phone,
                 patient_message=text,
                 patient_name=contact_name,
@@ -280,13 +384,7 @@ async def receive_message(request: Request):
         )
 
     normalized_resp = unicodedata.normalize("NFKD", response_text or "").encode("ascii", "ignore").decode("ascii").lower()
-    if any(marker in normalized_resp for marker in [
-        "vou encaminhar para",
-        "entrara em contato",
-        "sera notificada",
-        "vou encaminhar",
-        "vai conferir e te orientar",
-    ]):
+    if _response_triggers_handoff(normalized_resp):
         HandoffService.activate(phone)
         logger.info("Handoff ativado automaticamente apos resposta da IA para %s", phone)
 
@@ -477,12 +575,6 @@ def _extract_request_api_key(request: Request, payload: dict[str, Any] | None = 
         if value:
             return value.strip()
 
-    if isinstance(payload, dict):
-        for payload_key in ("apikey", "token", "key"):
-            value = payload.get(payload_key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-
     return ""
 
 
@@ -510,6 +602,14 @@ def _save_patient_if_missing(phone: str, patient_name: str) -> None:
     """Cria um cadastro minimo quando o paciente ainda nao existe."""
     state = ConversationStateService.get(phone)
     PatientService.upsert(phone, patient_name, state.plan_name or None)
+
+
+def _reset_to_idle(state: ConversationState) -> ConversationState:
+    """CO-08: Reseta todos os campos do estado para os defaults (stage='idle')."""
+    defaults = ConversationState()
+    for f in dataclasses.fields(ConversationState):
+        setattr(state, f.name, getattr(defaults, f.name))
+    return state
 
 
 def _resolve_valid_plan_name(phone: str) -> str:
@@ -803,26 +903,12 @@ def _capture_schedule_constraints(phone: str, text: str, state, history: list[di
     return changed
 
 
-def _split_response_messages(response_text: str) -> list[str]:
-    """Divide uma resposta em blocos curtos para envio no WhatsApp."""
-    chunks = []
-    for chunk in (response_text or "").split("\n\n"):
-        normalized = chunk.strip()
-        if normalized:
-            chunks.append(normalized)
-    return chunks or [response_text.strip()]
-
-
 async def _send_response(phone: str, response_text: str) -> bool:
-    """Envia uma resposta ao paciente, separando paragrafos quando fizer sentido."""
+    """Envia uma resposta ao paciente como mensagem única."""
     from ...infrastructure.integrations.whatsapp_service import WhatsAppService
 
     whatsapp = WhatsAppService()
-    for chunk in _split_response_messages(response_text):
-        delivered = await whatsapp.send_message(phone, chunk)
-        if not delivered:
-            return False
-    return True
+    return await whatsapp.send_message(phone, (response_text or "").strip())
 
 
 async def _handle_pending_slot_plan(
@@ -886,6 +972,75 @@ async def _handle_pending_slot_plan(
     return JSONResponse(
         {
             "status": "pending_slot_plan_resolved",
+            "phone": phone,
+            "response_preview": response_text[:100],
+        }
+    )
+
+
+async def _handle_pending_slot_name(
+    phone: str,
+    text: str,
+    contact_name: str,
+    message_id: str,
+):
+    """CO-03: Recebe o nome do paciente quando stage==awaiting_name_for_slot_confirmation."""
+    state = ConversationStateService.get(phone)
+    if state.stage != "awaiting_name_for_slot_confirmation":
+        return None
+    if not state.pending_slot_date or not state.pending_slot_time:
+        ConversationStateService.clear(phone)
+        return None
+
+    raw_name = text.strip()
+    is_placeholder = (
+        not raw_name
+        or raw_name.replace("+", "").isdigit()
+        or len(raw_name) < 3
+    )
+    if is_placeholder:
+        response_text = (
+            "Preciso do seu nome completo para confirmar a consulta.\n"
+            "Pode me dizer seu nome, por favor?"
+        )
+        delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver name request")
+            raise HTTPException(status_code=502, detail="Failed to deliver name request")
+        ConversationService.add_message(phone, "patient", text)
+        ConversationService.add_message(phone, "assistant", response_text)
+        if message_id:
+            _mark_message_processed(message_id, phone)
+        return JSONResponse({"status": "awaiting_name", "phone": phone})
+
+    pending_date = state.pending_slot_date
+    pending_time = state.pending_slot_time
+    plan_name = state.plan_name or None
+    state.patient_name = raw_name
+    _reset_to_idle(state)
+    ConversationStateService.save(phone, state)
+    PatientService.upsert(phone, raw_name, plan_name)
+
+    response_text = _build_slot_confirmation_request_message(
+        patient_name=raw_name,
+        date_str=pending_date,
+        time_str=pending_time,
+    )
+    delivered = await _send_response(phone, response_text)
+    if not delivered:
+        if message_id:
+            _mark_message_failed(message_id, phone, "Failed to deliver slot confirmation after name")
+        raise HTTPException(status_code=502, detail="Failed to deliver slot confirmation after name")
+
+    ConversationService.add_message(phone, "patient", text)
+    ConversationService.add_message(phone, "assistant", response_text)
+    if message_id:
+        _mark_message_processed(message_id, phone)
+
+    return JSONResponse(
+        {
+            "status": "pending_slot_name_resolved",
             "phone": phone,
             "response_preview": response_text[:100],
         }
@@ -1035,7 +1190,7 @@ async def _handle_offered_slot_selection(
             if state.intent == "reschedule":
                 new_event_id = _get_event_id(new_event)
                 cancelled = calendar.cancel_appointment(state.reschedule_event_id)
-                if not cancelled:
+                if not cancelled.cancelled:
                     _preserve_partial_reschedule_state(
                         phone=phone,
                         state=state,
@@ -1226,6 +1381,13 @@ async def _handle_offered_slot_selection(
     )
 
 
+_EXPLICIT_CANCEL_TOKENS = (
+    "cancelar", "desmarcar", "nao vou", "nao quero", "quero cancelar",
+    "pode cancelar", "cancela", "cancele",
+)
+_AMBIGUOUS_CANCEL_TOKENS = ("nao sei", "talvez", "ainda nao", "nao tenho certeza", "nao to")
+
+
 async def _handle_appointment_confirmation(
     phone: str,
     text: str,
@@ -1237,49 +1399,223 @@ async def _handle_appointment_confirmation(
     event_id = state.metadata.get(AppointmentConfirmationService.METADATA_EVENT_ID_KEY) or state.pending_event_id
 
     normalized = AppointmentOfferService._normalize(text)
-    
-    if any(token in normalized for token in ("remarcar", "reagendar", "mudar", "outro horario")):
-        state.intent = "reschedule"
-        state.stage = "idle"
-        state.reschedule_event_id = event_id or state.reschedule_event_id
-        state.reschedule_event_label = state.pending_event_label or state.reschedule_event_label
-        ConversationStateService.save(phone, state)
-        response_text = "Certo, vamos remarcar. Para qual dia e periodo voce gostaria de remarcar?"
-        
-        delivered = await _send_response(phone, response_text)
-        if message_id:
-            _mark_message_processed(message_id, phone)
-            
-        ConversationService.add_message(phone, "patient", text)
-        ConversationService.add_message(phone, "assistant", response_text)
-        return JSONResponse({"status": "reschedule_requested", "phone": phone})
 
-    if AppointmentOfferService.is_affirmative_confirmation(text):
-        response_text = "Perfeito! Sua consulta esta confirmada. Nos vemos la! 😊"
-        ConversationStateService.clear(phone)
-        
+    # --- PRIORIDADE: confirmar cancelamento pendente ---
+    # Quando paciente está em awaiting_cancel_confirmation, verificamos ANTES de qualquer outra coisa
+    if state.stage == "awaiting_cancel_confirmation":
+        if AppointmentOfferService.is_affirmative_confirmation(text):
+            # Confirmou o cancelamento — cai para o bloco de cancel explícito abaixo
+            pass
+        else:
+            # Não confirmou cancelamento; volta ao idle e deixa LLM tratar
+            state.stage = "idle"
+            ConversationStateService.save(phone, state)
+            return None
+
+    # --- Somente em CONFIRMATION_STAGE: remarcar e confirmar consulta ---
+    if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
+        if AppointmentOfferService.has_change_request(text):
+            state.intent = "reschedule"
+            state.stage = "idle"
+            state.reschedule_event_id = event_id or state.reschedule_event_id
+            state.reschedule_event_label = state.pending_event_label or state.reschedule_event_label
+            response_text = "Certo, vamos remarcar. Para qual dia e periodo voce gostaria de remarcar?"
+            delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver reschedule message")
+                raise HTTPException(status_code=502, detail="Failed to deliver reschedule message")
+            ConversationStateService.save(phone, state)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+            _resc_start = state.metadata.get(AppointmentConfirmationService.METADATA_START_KEY)
+            _resc_reminder = state.metadata.get(
+                AppointmentConfirmationService.METADATA_TYPE_KEY,
+                AppointmentConfirmationService.REMINDER_TYPE_DAY_BEFORE,
+            )
+            AppointmentConfirmationService.mark_patient_response(
+                event_id=event_id or "",
+                appointment_start=_resc_start or "",
+                status="rescheduled",
+                response_text=text,
+                reminder_type=_resc_reminder,
+            )
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            return JSONResponse({"status": "reschedule_requested", "phone": phone})
+
+        if AppointmentOfferService.is_affirmative_confirmation(text):
+            # T-003: conflito — afirmativo + pedido de mudanca → pede esclarecimento
+            if AppointmentOfferService.has_change_request(text):
+                response_text = "Nao entendi bem — voce quer confirmar a consulta ou prefere remarcar para outro horario?"
+                delivered = await _send_response(phone, response_text)
+                if not delivered:
+                    if message_id:
+                        _mark_message_failed(message_id, phone, "Failed to deliver ambiguous-confirmation clarification")
+                    raise HTTPException(status_code=502, detail="Failed to deliver ambiguous-confirmation clarification")
+                if message_id:
+                    _mark_message_processed(message_id, phone)
+                ConversationService.add_message(phone, "patient", text)
+                ConversationService.add_message(phone, "assistant", response_text)
+                return JSONResponse({"status": "ambiguous_confirmation_clarification", "phone": phone})
+            response_text = "Perfeito! Sua consulta esta confirmada. Nos vemos la! 😊"
+            delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver confirmation message")
+                raise HTTPException(status_code=502, detail="Failed to deliver confirmation message")
+            ConversationStateService.clear(phone)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+            _conf_start = state.metadata.get(AppointmentConfirmationService.METADATA_START_KEY)
+            _conf_reminder = state.metadata.get(
+                AppointmentConfirmationService.METADATA_TYPE_KEY,
+                AppointmentConfirmationService.REMINDER_TYPE_DAY_BEFORE,
+            )
+            AppointmentConfirmationService.mark_patient_response(
+                event_id=event_id or "",
+                appointment_start=_conf_start or "",
+                status="confirmed",
+                response_text=text,
+                reminder_type=_conf_reminder,
+            )
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            return JSONResponse({"status": "appointment_confirmed", "phone": phone})
+
+    # --- Detecção de intenção de cancelamento ---
+    is_explicit_cancel = (
+        state.stage == "awaiting_cancel_confirmation"  # já confirmou acima via is_affirmative
+        or any(token in normalized for token in _EXPLICIT_CANCEL_TOKENS)
+    )
+    is_ambiguous = not is_explicit_cancel and (
+        normalized.strip() in ("nao", "nao.", "nao!", "nao,") or
+        any(token in normalized for token in _AMBIGUOUS_CANCEL_TOKENS)
+    )
+
+    if is_ambiguous:
+        # Pede confirmação explícita antes de cancelar
+        label = state.pending_event_label or "sua consulta"
+        response_text = (
+            f"Voce gostaria de cancelar {label}? "
+            "Responda SIM para confirmar o cancelamento."
+        )
+        state.stage = "awaiting_cancel_confirmation"
+        ConversationStateService.save(phone, state)
         delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver cancel confirmation request")
+            raise HTTPException(status_code=502, detail="Failed to deliver cancel confirmation request")
         if message_id:
             _mark_message_processed(message_id, phone)
-            
         ConversationService.add_message(phone, "patient", text)
         ConversationService.add_message(phone, "assistant", response_text)
-        return JSONResponse({"status": "appointment_confirmed", "phone": phone})
-        
-    if any(token in normalized for token in ("nao", "cancelar", "nao vou", "desmarcar")):
-        if event_id:
-            CalendarService().cancel_appointment(event_id)
-            
-        response_text = "Consulta cancelada com sucesso. Se precisar agendar novamente, estou a disposicao!"
-        ConversationStateService.clear(phone)
-        
+        return JSONResponse({"status": "cancel_confirmation_requested", "phone": phone})
+
+    if is_explicit_cancel:
+        appointment_start = state.metadata.get(AppointmentConfirmationService.METADATA_START_KEY)
+        reminder_type = state.metadata.get(
+            AppointmentConfirmationService.METADATA_TYPE_KEY,
+            AppointmentConfirmationService.REMINDER_TYPE_DAY_BEFORE,
+        )
+
+        if not event_id:
+            # Sem event_id: não afirma sucesso, alerta a doutora
+            await _send_scope_alert(
+                patient_phone=phone,
+                patient_name=contact_name or "Desconhecido",
+                summary="Falha no cancelamento: event_id ausente",
+                reason="O paciente solicitou cancelamento mas o event_id nao estava disponivel no estado.",
+                last_message=text,
+            )
+            AppointmentConfirmationService.mark_patient_response(
+                event_id="",
+                appointment_start=appointment_start or "",
+                status="cancel_failed",
+                response_text=text,
+                reminder_type=reminder_type,
+            )
+            response_text = "Vou verificar isso com a Dra. Priscila e retorno o quanto antes."
+            delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver cancel-failed-no-event-id message")
+                raise HTTPException(status_code=502, detail="Failed to deliver cancel-failed-no-event-id message")
+            if message_id:
+                _mark_message_processed(message_id, phone)
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            return JSONResponse({"status": "cancel_failed_no_event_id", "phone": phone})
+
+        result: CancelResult = CalendarService().cancel_appointment(event_id)
+
+        if result.cancelled:
+            response_text = "Consulta cancelada com sucesso. Se precisar agendar novamente, estou a disposicao!"
+            delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver cancel success message")
+                raise HTTPException(status_code=502, detail="Failed to deliver cancel success message")
+            ConversationStateService.clear(phone)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            AppointmentConfirmationService.mark_patient_response(
+                event_id=event_id,
+                appointment_start=appointment_start or "",
+                status="cancelled",
+                response_text=text,
+                reminder_type=reminder_type,
+            )
+            return JSONResponse({"status": "appointment_cancelled", "phone": phone})
+
+        # Falha real no cancelamento
+        await _send_scope_alert(
+            patient_phone=phone,
+            patient_name=contact_name or "Desconhecido",
+            summary="Falha ao cancelar consulta no Calendar",
+            reason=result.error or "Erro desconhecido na API do Google Calendar",
+            last_message=text,
+        )
+        AppointmentConfirmationService.mark_patient_response(
+            event_id=event_id,
+            appointment_start=appointment_start or "",
+            status="cancel_failed",
+            response_text=text,
+            reminder_type=reminder_type,
+        )
+        response_text = "Vou verificar isso com a Dra. Priscila e retorno o quanto antes."
         delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver cancel-failed message")
+            raise HTTPException(status_code=502, detail="Failed to deliver cancel-failed message")
         if message_id:
             _mark_message_processed(message_id, phone)
-            
         ConversationService.add_message(phone, "patient", text)
         ConversationService.add_message(phone, "assistant", response_text)
-        return JSONResponse({"status": "appointment_cancelled", "phone": phone})
+        return JSONResponse({"status": "cancel_failed", "phone": phone})
+
+    # CO-03: deterministic fallback when CONFIRMATION_STAGE receives an unrecognized message
+    # — never let it fall through to the LLM during an active confirmation flow
+    if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
+        label = state.pending_event_label or "sua consulta"
+        response_text = (
+            f"Por favor, confirme se voce ira comparecer a {label}. "
+            "Responda SIM para confirmar, NAO para cancelar ou REMARCAR para mudar o horario."
+        )
+        delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver confirmation reask")
+            raise HTTPException(status_code=502, detail="Failed to deliver confirmation reask")
+        if message_id:
+            _mark_message_processed(message_id, phone)
+        ConversationService.add_message(phone, "patient", text)
+        ConversationService.add_message(phone, "assistant", response_text)
+        return JSONResponse({"status": "confirmation_reask", "phone": phone})
 
     return None
 
@@ -1328,7 +1664,18 @@ async def _handle_scope_escalation(
     )
 
     response_text = _get_patient_escalation_message()
-    ConversationStateService.clear(phone)
+
+    # WE-07: only clear state when there's no active agenda (pending slot, reschedule, etc.)
+    _esc_state = ConversationStateService.get(phone)
+    _has_active_agenda = bool(
+        _esc_state.pending_slot_date
+        or _esc_state.pending_slot_time
+        or _esc_state.pending_event_id
+        or _esc_state.reschedule_event_id
+        or getattr(_esc_state, "intent", "") == "reschedule"
+    )
+    if not _has_active_agenda:
+        ConversationStateService.clear(phone)
 
     delivered = await _send_response(phone, response_text)
     if not delivered:
@@ -1357,35 +1704,23 @@ def _authenticate_request(
     *,
     require_key: bool = True,
     include_evolution_fallback: bool = False,
-    allow_unauthorized: bool = False,
 ) -> None:
     """Valida se a chamada veio com a chave configurada."""
-    global _webhook_auth_warning_logged, _webhook_auth_mismatch_warning_logged
+    global _webhook_auth_warning_logged
 
     dedicated_keys, fallback_keys = _get_configured_api_keys(
         include_evolution_fallback=include_evolution_fallback
     )
     accepted_keys = dedicated_keys + fallback_keys
 
-    if not dedicated_keys:
-        if require_key:
-            if not accepted_keys:
-                logger.error("Webhook API key nao configurada.")
-                raise HTTPException(status_code=503, detail="Webhook authentication not configured")
-        else:
-            if not accepted_keys and not _webhook_auth_warning_logged:
-                logger.warning(
-                    "Webhook /webhook/message sem autenticacao dedicada configurada. "
-                    "Defina WEBHOOK_API_KEY para proteger esse endpoint."
-                )
-                _webhook_auth_warning_logged = True
-            return
-
     if not accepted_keys:
+        if require_key:
+            logger.error("Webhook API key nao configurada.")
+            raise HTTPException(status_code=503, detail="Webhook authentication not configured")
         if not _webhook_auth_warning_logged:
-            logger.warning(
-                "Webhook /webhook/message sem autenticacao dedicada configurada. "
-                "Defina WEBHOOK_API_KEY para proteger esse endpoint."
+            logger.critical(
+                "WEBHOOK EXPOSTO: nenhuma chave configurada (WEBHOOK_API_KEY). "
+                "Qualquer requisicao sera aceita. Defina a chave para fechar o endpoint."
             )
             _webhook_auth_warning_logged = True
         return
@@ -1395,14 +1730,6 @@ def _authenticate_request(
         hmac.compare_digest(provided_api_key, expected_api_key)
         for expected_api_key in accepted_keys
     ):
-        if allow_unauthorized:
-            if not _webhook_auth_mismatch_warning_logged:
-                logger.warning(
-                    "Webhook /webhook/message recebido sem chave valida. "
-                    "A requisicao sera aceita para compatibilidade com a Evolution."
-                )
-                _webhook_auth_mismatch_warning_logged = True
-            return
         raise HTTPException(status_code=401, detail="Unauthorized webhook request")
 
 
@@ -1418,61 +1745,84 @@ def _is_processing_stale(processed_at: str | None, max_age_minutes: int = 5) -> 
 
 
 def _try_claim_message_processing(message_id: str, phone: str) -> tuple[bool, str]:
-    """Tenta reservar o processamento de uma mensagem."""
-    db = get_db()
-    cursor = db.execute(
-        "INSERT OR IGNORE INTO processed_messages (message_id, phone, status, last_error) "
-        "VALUES (?, ?, 'processing', NULL)",
-        (message_id, phone),
-    )
-    if cursor.rowcount == 1:
-        db.commit()
-        return True, "claimed"
+    """Tenta reservar o processamento de uma mensagem.
 
-    row = db.execute(
-        "SELECT status, processed_at FROM processed_messages WHERE message_id = ?",
-        (message_id,),
-    ).fetchone()
-    if row is None:
-        return False, "missing"
-
-    status = (row["status"] or "processed").lower()
-    if status == "failed" or (status == "processing" and _is_processing_stale(row["processed_at"])):
+    Em falha de SQLite (lock/IO) degrada de forma segura permitindo o
+    processamento (melhor um raro duplicado do que derrubar o atendimento com 500).
+    """
+    try:
+        db = get_db()
         cursor = db.execute(
+            "INSERT OR IGNORE INTO processed_messages (message_id, phone, status, last_error) "
+            "VALUES (?, ?, 'processing', NULL)",
+            (message_id, phone),
+        )
+        if cursor.rowcount == 1:
+            db.commit()
+            return True, "claimed"
+
+        row = db.execute(
+            "SELECT status, processed_at FROM processed_messages WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            return False, "missing"
+
+        status = (row["status"] or "processed").lower()
+        if status == "failed" or (status == "processing" and _is_processing_stale(row["processed_at"])):
+            cursor = db.execute(
+                "UPDATE processed_messages "
+                "SET phone = ?, status = 'processing', last_error = NULL, processed_at = CURRENT_TIMESTAMP "
+                "WHERE message_id = ?",
+                (phone, message_id),
+            )
+            db.commit()
+            if cursor.rowcount == 1:
+                return True, "reclaimed"
+
+        return False, status
+    except Exception as exc:
+        logger.error(
+            "Falha ao reservar processamento da mensagem %s; seguindo sem idempotencia: %s",
+            message_id,
+            exc,
+            exc_info=True,
+        )
+        return True, "claim_degraded"
+
+
+def _mark_message_processed(message_id: str, phone: str) -> None:
+    """Marca o message_id como processado com sucesso (degrada com log em falha de DB)."""
+    try:
+        db = get_db()
+        db.execute(
             "UPDATE processed_messages "
-            "SET phone = ?, status = 'processing', last_error = NULL, processed_at = CURRENT_TIMESTAMP "
+            "SET phone = ?, status = 'processed', last_error = NULL, processed_at = CURRENT_TIMESTAMP "
             "WHERE message_id = ?",
             (phone, message_id),
         )
         db.commit()
-        if cursor.rowcount == 1:
-            return True, "reclaimed"
-
-    return False, status
-
-
-def _mark_message_processed(message_id: str, phone: str) -> None:
-    """Marca o message_id como processado com sucesso."""
-    db = get_db()
-    db.execute(
-        "UPDATE processed_messages "
-        "SET phone = ?, status = 'processed', last_error = NULL, processed_at = CURRENT_TIMESTAMP "
-        "WHERE message_id = ?",
-        (phone, message_id),
-    )
-    db.commit()
+    except Exception as exc:
+        logger.error(
+            "Falha ao marcar mensagem %s como processada: %s", message_id, exc, exc_info=True
+        )
 
 
 def _mark_message_failed(message_id: str, phone: str, error: str) -> None:
-    """Registra falha para permitir retry futuro do mesmo webhook."""
-    db = get_db()
-    db.execute(
-        "UPDATE processed_messages "
-        "SET phone = ?, status = 'failed', last_error = ?, processed_at = CURRENT_TIMESTAMP "
-        "WHERE message_id = ?",
-        (phone, error[:500], message_id),
-    )
-    db.commit()
+    """Registra falha para permitir retry futuro do mesmo webhook (degrada com log)."""
+    try:
+        db = get_db()
+        db.execute(
+            "UPDATE processed_messages "
+            "SET phone = ?, status = 'failed', last_error = ?, processed_at = CURRENT_TIMESTAMP "
+            "WHERE message_id = ?",
+            (phone, error[:500], message_id),
+        )
+        db.commit()
+    except Exception as exc:
+        logger.error(
+            "Falha ao marcar mensagem %s como falha: %s", message_id, exc, exc_info=True
+        )
 
 
 async def _notify_doctor_of_processing_error(

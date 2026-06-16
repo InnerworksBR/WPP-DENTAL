@@ -59,8 +59,28 @@ def _extract_key(request: Request) -> str:
     return _clean_key(request.query_params.get("key", ""))
 
 
+_PLACEHOLDER_KEY = "your-admin-panel-key"
+
+
+def _is_production() -> bool:
+    return os.getenv("ENVIRONMENT", "").lower() == "production"
+
+
+def _is_strong_key(key: str) -> bool:
+    cleaned = _clean_key(key)
+    return bool(cleaned) and cleaned != _PLACEHOLDER_KEY
+
+
 def _require_admin(request: Request) -> None:
     keys = _configured_admin_keys()
+    strong_keys = [k for k in keys if _is_strong_key(k)]
+
+    if _is_production() and not strong_keys:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin panel authentication not configured",
+        )
+
     if not keys:
         return
 
@@ -73,17 +93,27 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return dict(row) if row is not None else {}
 
 
-def _parse_date(value: str) -> datetime:
+def _parse_date(value: str, reject_past: bool = False) -> datetime:
     try:
-        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=SAO_PAULO_TZ)
+        dt = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=SAO_PAULO_TZ)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Data invalida. Use YYYY-MM-DD.") from exc
+    if reject_past and dt.date() < datetime.now(SAO_PAULO_TZ).date():
+        raise HTTPException(
+            status_code=422, detail="Nao e possivel bloquear uma data no passado."
+        )
+    return dt
 
 
-def _calendar_error_payload(exc: Exception) -> dict[str, Any]:
+import logging as _logging
+_admin_logger = _logging.getLogger("wpp-dental")
+
+
+def _calendar_error_payload(exc: Exception, context: str = "agenda") -> dict[str, Any]:
+    _admin_logger.error("Erro ao consultar %s: %s", context, exc, exc_info=True)
     return {
         "ok": False,
-        "error": str(exc),
+        "error": f"Falha ao consultar {context}.",
         "items": [],
     }
 
@@ -103,120 +133,132 @@ async def get_auth_config() -> dict[str, Any]:
 @router.get("/api/summary")
 async def get_summary(request: Request) -> dict[str, Any]:
     _require_admin(request)
-    db = get_db()
-    config = ConfigService()
+    try:
+        db = get_db()
+        config = ConfigService()
 
-    since_24h = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
-    since_7d = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        since_24h = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        since_7d = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
 
-    return {
-        "service": "wpp-dental",
-        "doctor": config.get_doctor_name(),
-        "plans": config.get_plan_names(),
-        "metrics": {
-            "patients": db.execute("SELECT COUNT(*) AS total FROM patients").fetchone()["total"],
-            "conversations": db.execute(
-                "SELECT COUNT(DISTINCT phone) AS total FROM conversation_history"
-            ).fetchone()["total"],
-            "messages_24h": db.execute(
-                "SELECT COUNT(*) AS total FROM conversation_history WHERE created_at >= ?",
-                (since_24h,),
-            ).fetchone()["total"],
-            "active_states": db.execute(
-                "SELECT COUNT(*) AS total FROM conversation_state"
-            ).fetchone()["total"],
-            "failed_messages_7d": db.execute(
-                "SELECT COUNT(*) AS total FROM processed_messages "
-                "WHERE status = 'failed' AND processed_at >= ?",
-                (since_7d,),
-            ).fetchone()["total"],
-            "pending_confirmations": db.execute(
-                "SELECT COUNT(*) AS total FROM appointment_confirmations "
-                "WHERE status IN ('sent', 'pending')"
-            ).fetchone()["total"],
-        },
-    }
+        return {
+            "service": "wpp-dental",
+            "doctor": config.get_doctor_name(),
+            "plans": config.get_plan_names(),
+            "metrics": {
+                "patients": db.execute("SELECT COUNT(*) AS total FROM patients").fetchone()["total"],
+                "conversations": db.execute(
+                    "SELECT COUNT(DISTINCT phone) AS total FROM conversation_history"
+                ).fetchone()["total"],
+                "messages_24h": db.execute(
+                    "SELECT COUNT(*) AS total FROM conversation_history WHERE created_at >= ?",
+                    (since_24h,),
+                ).fetchone()["total"],
+                "active_states": db.execute(
+                    "SELECT COUNT(*) AS total FROM conversation_state"
+                ).fetchone()["total"],
+                "failed_messages_7d": db.execute(
+                    "SELECT COUNT(*) AS total FROM processed_messages "
+                    "WHERE status = 'failed' AND processed_at >= ?",
+                    (since_7d,),
+                ).fetchone()["total"],
+                "pending_confirmations": db.execute(
+                    "SELECT COUNT(*) AS total FROM appointment_confirmations "
+                    "WHERE status IN ('sent', 'pending')"
+                ).fetchone()["total"],
+            },
+        }
+    except Exception as exc:
+        _admin_logger.error("Erro em get_summary: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Falha ao carregar resumo.")
 
 
 @router.get("/api/patients")
 async def list_patients(request: Request, limit: int = 500, q: str = "") -> dict[str, Any]:
     _require_admin(request)
-    limit = max(1, min(limit, 1000))
-    search = f"%{q.strip()}%"
-    params: list[Any] = []
-    where = ""
-    if q.strip():
-        where = "WHERE p.name LIKE ? OR p.phone LIKE ? OR COALESCE(p.plan, '') LIKE ?"
-        params.extend([search, search, search])
+    try:
+        limit = max(1, min(limit, 1000))
+        search = f"%{q.strip()}%"
+        params: list[Any] = []
+        where = ""
+        if q.strip():
+            where = "WHERE p.name LIKE ? OR p.phone LIKE ? OR COALESCE(p.plan, '') LIKE ?"
+            params.extend([search, search, search])
 
-    db = get_db()
-    rows = db.execute(
-        f"""
-        SELECT
-            p.id,
-            p.phone,
-            p.name,
-            p.plan,
-            p.created_at,
-            p.updated_at,
-            COUNT(DISTINCT i.id) AS interaction_count,
-            COUNT(DISTINCT h.id) AS message_count,
-            MAX(h.created_at) AS last_message_at,
-            s.updated_at AS state_updated_at
-        FROM patients p
-        LEFT JOIN interactions i ON i.patient_id = p.id
-        LEFT JOIN conversation_history h ON h.phone = p.phone
-        LEFT JOIN conversation_state s ON s.phone = p.phone
-        {where}
-        GROUP BY p.id
-        ORDER BY COALESCE(MAX(h.created_at), p.updated_at, p.created_at) DESC
-        LIMIT ?
-        """,
-        (*params, limit),
-    ).fetchall()
-    return {"items": [_row_to_dict(row) for row in rows]}
+        db = get_db()
+        rows = db.execute(
+            f"""
+            SELECT
+                p.id,
+                p.phone,
+                p.name,
+                p.plan,
+                p.created_at,
+                p.updated_at,
+                COUNT(DISTINCT i.id) AS interaction_count,
+                COUNT(DISTINCT h.id) AS message_count,
+                MAX(h.created_at) AS last_message_at,
+                s.updated_at AS state_updated_at
+            FROM patients p
+            LEFT JOIN interactions i ON i.patient_id = p.id
+            LEFT JOIN conversation_history h ON h.phone = p.phone
+            LEFT JOIN conversation_state s ON s.phone = p.phone
+            {where}
+            GROUP BY p.id
+            ORDER BY COALESCE(MAX(h.created_at), p.updated_at, p.created_at) DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+        return {"items": [_row_to_dict(row) for row in rows]}
+    except Exception as exc:
+        _admin_logger.error("Erro em list_patients: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Falha ao listar pacientes.")
 
 
 @router.get("/api/conversations")
 async def list_conversations(request: Request, limit: int = 40) -> dict[str, Any]:
     _require_admin(request)
-    limit = max(1, min(limit, 100))
-    db = get_db()
-    rows = db.execute(
-        """
-        SELECT
-            h.phone,
-            MAX(h.created_at) AS last_message_at,
-            COUNT(*) AS message_count,
-            p.name AS patient_name,
-            p.plan AS plan,
-            s.state_json AS state_json,
-            s.updated_at AS state_updated_at
-        FROM conversation_history h
-        LEFT JOIN patients p ON p.phone = h.phone
-        LEFT JOIN conversation_state s ON s.phone = h.phone
-        GROUP BY h.phone
-        ORDER BY last_message_at DESC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    try:
+        limit = max(1, min(limit, 100))
+        db = get_db()
+        rows = db.execute(
+            """
+            SELECT
+                h.phone,
+                MAX(h.created_at) AS last_message_at,
+                COUNT(*) AS message_count,
+                p.name AS patient_name,
+                p.plan AS plan,
+                s.state_json AS state_json,
+                s.updated_at AS state_updated_at
+            FROM conversation_history h
+            LEFT JOIN patients p ON p.phone = h.phone
+            LEFT JOIN conversation_state s ON s.phone = h.phone
+            GROUP BY h.phone
+            ORDER BY last_message_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
 
-    items = []
-    for row in rows:
-        last = db.execute(
-            "SELECT role, content FROM conversation_history "
-            "WHERE phone = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-            (row["phone"],),
-        ).fetchone()
-        items.append(
-            {
-                **_row_to_dict(row),
-                "last_role": last["role"] if last else "",
-                "last_content": last["content"] if last else "",
-            }
-        )
-    return {"items": items}
+        items = []
+        for row in rows:
+            last = db.execute(
+                "SELECT role, content FROM conversation_history "
+                "WHERE phone = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                (row["phone"],),
+            ).fetchone()
+            items.append(
+                {
+                    **_row_to_dict(row),
+                    "last_role": last["role"] if last else "",
+                    "last_content": last["content"] if last else "",
+                }
+            )
+        return {"items": items}
+    except Exception as exc:
+        _admin_logger.error("Erro em list_conversations: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Falha ao listar conversas.")
 
 
 @router.get("/api/conversations/{phone}")
@@ -252,26 +294,30 @@ async def get_conversation(request: Request, phone: str, limit: int = 120) -> di
 @router.get("/api/errors")
 async def list_errors(request: Request, limit: int = 50) -> dict[str, Any]:
     _require_admin(request)
-    limit = max(1, min(limit, 100))
-    db = get_db()
-    failed = db.execute(
-        "SELECT message_id, phone, status, last_error, processed_at "
-        "FROM processed_messages "
-        "WHERE status IN ('failed', 'processing') "
-        "ORDER BY processed_at DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    confirmations = db.execute(
-        "SELECT id, event_id, phone, patient_name, appointment_start, status, "
-        "response_text, sent_at, responded_at "
-        "FROM appointment_confirmations "
-        "ORDER BY sent_at DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    return {
-        "processed_messages": [_row_to_dict(row) for row in failed],
-        "appointment_confirmations": [_row_to_dict(row) for row in confirmations],
-    }
+    try:
+        limit = max(1, min(limit, 100))
+        db = get_db()
+        failed = db.execute(
+            "SELECT message_id, phone, status, last_error, processed_at "
+            "FROM processed_messages "
+            "WHERE status IN ('failed', 'processing') "
+            "ORDER BY processed_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        confirmations = db.execute(
+            "SELECT id, event_id, phone, patient_name, appointment_start, status, "
+            "response_text, sent_at, responded_at "
+            "FROM appointment_confirmations "
+            "ORDER BY sent_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return {
+            "processed_messages": [_row_to_dict(row) for row in failed],
+            "appointment_confirmations": [_row_to_dict(row) for row in confirmations],
+        }
+    except Exception as exc:
+        _admin_logger.error("Erro em list_errors: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Falha ao listar erros.")
 
 
 @router.get("/api/appointments")
@@ -328,7 +374,7 @@ async def create_block(request: Request, payload: DayBlockPayload) -> dict[str, 
     _require_admin(request)
     calendar = CalendarService()
     try:
-        event = calendar.create_day_block(_parse_date(payload.date), payload.reason)
+        event = calendar.create_day_block(_parse_date(payload.date, reject_past=True), payload.reason)
     except HTTPException:
         raise
     except Exception as exc:
@@ -341,9 +387,16 @@ async def delete_block(request: Request, event_id: str) -> dict[str, Any]:
     _require_admin(request)
     calendar = CalendarService()
     try:
+        service = calendar._get_service()
+        event = service.events().get(calendarId=calendar.calendar_id, eventId=event_id).execute()
+    except Exception:
+        return {"ok": False, "error": "Bloqueio nao encontrado.", "items": []}
+    if not CalendarService.event_is_day_block(event):
+        return {"ok": False, "error": "Evento nao e um bloqueio.", "items": []}
+    try:
         deleted = calendar.delete_day_block(event_id)
     except Exception as exc:
-        return _calendar_error_payload(exc)
+        return _calendar_error_payload(exc, context="bloqueio")
     if not deleted:
         return {"ok": False, "error": "Bloqueio nao encontrado.", "items": []}
     return {"ok": True}

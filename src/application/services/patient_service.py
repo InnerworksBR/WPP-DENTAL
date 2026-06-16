@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...domain.policies.phone_service import build_phone_search_term, normalize_internal_phone
+from ...domain.policies.phone_service import (
+    build_phone_search_term,
+    canonical_phone,
+    normalize_internal_phone,
+    phones_match,
+)
 from ...infrastructure.persistence.connection import get_db
 
 
@@ -13,21 +18,36 @@ class PatientService:
 
     @staticmethod
     def find_by_phone(phone: str) -> dict[str, Any] | None:
-        search_term = build_phone_search_term(phone)
+        """PH-02: busca por igualdade canonica; fallback em memoria por phones_match."""
+        canon = canonical_phone(phone)
         db = get_db()
-        row = db.execute(
-            "SELECT id, name, phone, plan FROM patients "
-            "WHERE phone LIKE ? ORDER BY id DESC LIMIT 1",
-            (f"%{search_term}%",),
-        ).fetchone()
-        if row is None:
-            return None
-        return {
-            "id": int(row["id"]),
-            "name": str(row["name"] or "").strip(),
-            "phone": str(row["phone"] or "").strip(),
-            "plan": str(row["plan"] or "").strip(),
-        }
+
+        if canon:
+            row = db.execute(
+                "SELECT id, name, phone, plan FROM patients WHERE phone = ? LIMIT 1",
+                (canon,),
+            ).fetchone()
+            if row:
+                return {
+                    "id": int(row["id"]),
+                    "name": str(row["name"] or "").strip(),
+                    "phone": str(row["phone"] or "").strip(),
+                    "plan": str(row["plan"] or "").strip(),
+                }
+
+        # Fallback: comparar em memoria por phones_match (legados ainda nao normalizados)
+        rows = db.execute(
+            "SELECT id, name, phone, plan FROM patients ORDER BY id DESC"
+        ).fetchall()
+        for row in rows:
+            if phones_match(row["phone"], phone):
+                return {
+                    "id": int(row["id"]),
+                    "name": str(row["name"] or "").strip(),
+                    "phone": str(row["phone"] or "").strip(),
+                    "plan": str(row["plan"] or "").strip(),
+                }
+        return None
 
     @staticmethod
     def resolve_name(phone: str, fallback_name: str = "") -> str:
@@ -38,28 +58,33 @@ class PatientService:
 
     @staticmethod
     def upsert(phone: str, name: str, plan: str | None = None) -> None:
-        normalized_phone = normalize_internal_phone(phone)
+        """PA-01: nao-destrutivo — preserva nome valido e plano existentes."""
+        canon = canonical_phone(phone) or normalize_internal_phone(phone)
         patient_name = (name or "").strip()
         plan_name = (plan or "").strip() or None
-        search_term = build_phone_search_term(phone)
         db = get_db()
 
-        existing = db.execute(
-            "SELECT id, plan FROM patients WHERE phone LIKE ? ORDER BY id DESC LIMIT 1",
-            (f"%{search_term}%",),
-        ).fetchone()
+        existing = PatientService.find_by_phone(phone)
 
         if existing:
-            final_plan = plan_name if plan_name is not None else existing["plan"]
+            ex_name = existing["name"]
+            ex_plan = existing["plan"] or None
+            is_placeholder = (
+                not patient_name
+                or patient_name.replace("+", "").isdigit()
+                or len(patient_name) < 3
+            )
+            final_name = ex_name if (ex_name and is_placeholder) else (patient_name or ex_name)
+            final_plan = plan_name if plan_name is not None else ex_plan
             db.execute(
                 "UPDATE patients SET phone = ?, name = ?, plan = ?, updated_at = CURRENT_TIMESTAMP "
                 "WHERE id = ?",
-                (normalized_phone, patient_name, final_plan, existing["id"]),
+                (canon, final_name, final_plan, existing["id"]),
             )
         else:
             db.execute(
                 "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
-                (normalized_phone, patient_name, plan_name),
+                (canon, patient_name, plan_name),
             )
         db.commit()
 

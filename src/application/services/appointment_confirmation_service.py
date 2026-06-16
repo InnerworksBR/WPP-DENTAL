@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -115,7 +116,7 @@ class AppointmentConfirmationService:
             (event_id, reminder_type, serialized_start),
         ).fetchone()
         status = str(row["status"] or "").lower() if row else ""
-        if status == "failed":
+        if status in ("failed", "processing"):
             cursor = db.execute(
                 "UPDATE appointment_confirmations "
                 "SET phone = ?, patient_name = ?, status = 'processing', response_text = NULL, "
@@ -200,33 +201,38 @@ class AppointmentConfirmationService:
     def _build_day_before_message(self, patient_name: str, start_time: datetime) -> str:
         first_name = (patient_name or "").strip().split()[0] if patient_name else ""
         start_sp = self._normalize_datetime(start_time)
+        date_str = start_sp.strftime("%d/%m/%Y")
+        time_str = start_sp.strftime("%H:%M")
         message = self.config.get_message(
             "appointment_confirmation.day_before",
             patient_name=first_name or "voce",
-            date=start_sp.strftime("%d/%m/%Y"),
-            time=start_sp.strftime("%H:%M"),
+            date=date_str,
+            time=time_str,
             doctor_name=self.config.get_doctor_name(),
         ).strip()
-        if message:
+        # Só usa mensagem do config se contiver a data — descarta fallback genérico de erro
+        if message and date_str in message:
             return message
         prefix = f"{first_name}, " if first_name else ""
         return (
             f"{prefix}passando para confirmar sua consulta de amanha.\n\n"
-            f"Data: {start_sp.strftime('%d/%m/%Y')}\n"
-            f"Horario: {start_sp.strftime('%H:%M')}\n\n"
+            f"Data: {date_str}\n"
+            f"Horario: {time_str}\n\n"
             "Voce consegue comparecer? Se precisar remarcar, me avise por aqui."
         )
 
     def _select_unique_appointments(self, appointments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        unique_by_phone: dict[str, dict[str, Any]] = {}
+        # CO-06: deduplicar por (phone, event_id) — mesmo paciente pode ter N consultas
+        unique_by_phone_event: dict[tuple, dict[str, Any]] = {}
         for appointment in appointments:
             phone = str(appointment.get("patient_phone", "")).strip()
-            if not phone:
+            event_id = str(appointment.get("event_id", "")).strip()
+            if not phone or not event_id:
                 continue
-            current = unique_by_phone.get(phone)
-            if current is None or appointment["start_time"] < current["start_time"]:
-                unique_by_phone[phone] = appointment
-        return sorted(unique_by_phone.values(), key=lambda item: item["start_time"])
+            key = (phone, event_id)
+            if key not in unique_by_phone_event:
+                unique_by_phone_event[key] = appointment
+        return sorted(unique_by_phone_event.values(), key=lambda item: item["start_time"])
 
     def _build_confirmation_state(
         self,
@@ -279,73 +285,121 @@ class AppointmentConfirmationService:
             if not phone or not event_id or not isinstance(start_time, datetime):
                 continue
 
-            current_state = ConversationStateService.get(phone)
-            if current_state.stage != "idle":
-                # Só pula se o estado for recente (< 2h) — estado antigo é considerado expirado
-                updated_at = ConversationStateService.get_updated_at(phone)
-                state_is_recent = (
-                    updated_at is not None
-                    and (datetime.utcnow() - updated_at).total_seconds() < 7200
-                )
-                if state_is_recent:
+            try:
+                current_state = ConversationStateService.get(phone)
+                if current_state.stage != "idle":
+                    # Só pula se o estado for recente (< 2h) — estado antigo é considerado expirado
+                    updated_at = ConversationStateService.get_updated_at(phone)
+                    state_is_recent = (
+                        updated_at is not None
+                        and (datetime.utcnow() - updated_at).total_seconds() < 7200
+                    )
+                    if state_is_recent:
+                        logger.info(
+                            "[confirmacao] %s | pulado (stage=%s, atualizado há %.0f min)",
+                            phone,
+                            current_state.stage,
+                            (datetime.utcnow() - updated_at).total_seconds() / 60,
+                        )
+                        stats["skipped_busy"] += 1
+                        continue
+                    # CO-07: nao apagar conversa em andamento; apenas pular
                     logger.info(
-                        "[confirmacao] %s | pulado (stage=%s, atualizado há %.0f min)",
-                        phone,
-                        current_state.stage,
-                        (datetime.utcnow() - updated_at).total_seconds() / 60,
+                        "[confirmacao] %s | estado expirado (stage=%s) — pulando para nao interromper conversa",
+                        phone, current_state.stage,
                     )
                     stats["skipped_busy"] += 1
                     continue
-                logger.info(
-                    "[confirmacao] %s | estado expirado (stage=%s) — enviando mesmo assim",
-                    phone, current_state.stage,
-                )
-                ConversationStateService.clear(phone)
 
-            patient = PatientService.find_by_phone(phone) or {}
-            patient_name = str(
-                patient.get("name")
-                or appointment.get("patient_name")
-                or phone
-            ).strip()
-            plan_name = str(patient.get("plan") or "").strip()
+                patient = PatientService.find_by_phone(phone) or {}
+                patient_name = str(
+                    patient.get("name")
+                    or appointment.get("patient_name")
+                    or phone
+                ).strip()
+                plan_name = str(patient.get("plan") or "").strip()
 
-            claimed = self._try_claim_reminder_send(
-                event_id=event_id,
-                phone=phone,
-                patient_name=patient_name,
-                appointment_start=start_time,
-            )
-            if not claimed:
-                stats["skipped_duplicates"] += 1
-                continue
-
-            message = self._build_day_before_message(patient_name, start_time)
-            delivered = await self.whatsapp.send_message(phone, message)
-            if not delivered:
-                self._mark_reminder_failed(
+                claimed = self._try_claim_reminder_send(
                     event_id=event_id,
+                    phone=phone,
+                    patient_name=patient_name,
                     appointment_start=start_time,
                 )
-                stats["failed"] += 1
-                continue
+                if not claimed:
+                    stats["skipped_duplicates"] += 1
+                    continue
 
-            ConversationService.add_message(phone, "assistant", message)
-            ConversationStateService.save(
-                phone,
-                self._build_confirmation_state(
-                    patient_name=patient_name,
-                    plan_name=plan_name,
+                message = self._build_day_before_message(patient_name, start_time)
+                delivered = await self.whatsapp.send_message(phone, message)
+                if not delivered:
+                    self._mark_reminder_failed(
+                        event_id=event_id,
+                        appointment_start=start_time,
+                    )
+                    stats["failed"] += 1
+                    continue
+
+                ConversationService.add_message(phone, "assistant", message)
+                ConversationStateService.save(
+                    phone,
+                    self._build_confirmation_state(
+                        patient_name=patient_name,
+                        plan_name=plan_name,
+                        event_id=event_id,
+                        start_time=start_time,
+                    ),
+                )
+                self._mark_reminder_sent(
                     event_id=event_id,
-                    start_time=start_time,
-                ),
-            )
-            self._mark_reminder_sent(
-                event_id=event_id,
-                phone=phone,
-                patient_name=patient_name,
-                appointment_start=start_time,
-            )
-            stats["sent"] += 1
+                    phone=phone,
+                    patient_name=patient_name,
+                    appointment_start=start_time,
+                )
+                stats["sent"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[confirmacao] excecao ao processar %s (event=%s): %s",
+                    phone, event_id, exc, exc_info=True,
+                )
+                try:
+                    self._mark_reminder_failed(event_id=event_id, appointment_start=start_time)
+                except Exception:
+                    pass
+                stats["failed"] += 1
 
         return stats
+
+    async def run_catchup_if_missed(
+        self,
+        now: datetime | None = None,
+    ) -> dict[str, int] | None:
+        """CO-04: executa confirmacoes se o disparo das 20h foi perdido por restart/queda.
+
+        Retorna stats se executou, None se nao foi necessario.
+        """
+        now_tz = self._normalize_datetime(now or datetime.now(SAO_PAULO_TZ))
+        if now_tz.hour < self.REMINDER_HOUR:
+            return None
+        target_date = (now_tz + timedelta(days=1)).date()
+        db = get_db()
+        row = db.execute(
+            "SELECT COUNT(*) AS cnt FROM appointment_confirmations "
+            "WHERE appointment_start LIKE ? AND status IN ('sent', 'processing')",
+            (f"{target_date.isoformat()}%",),
+        ).fetchone()
+        sent_count = int(row["cnt"]) if row else 0
+        if sent_count > 0:
+            logger.info(
+                "[confirmacao] catch-up: %d lembrete(s) ja enviado(s)/em andamento para %s — nenhuma acao",
+                sent_count,
+                target_date,
+            )
+            return None
+        logger.info(
+            "[confirmacao] catch-up: nenhum lembrete para %s apos as %02dh — enviando agora",
+            target_date,
+            self.REMINDER_HOUR,
+        )
+        return await self.send_next_day_confirmations(reference_time=now_tz)

@@ -9,12 +9,25 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
+
+try:  # pragma: no cover - dependencias do SDK OpenAI
+    from openai import APIConnectionError, APITimeoutError, RateLimitError
+except Exception:  # pragma: no cover - fallback defensivo se o SDK mudar
+    class APITimeoutError(Exception):
+        ...
+
+    class RateLimitError(Exception):
+        ...
+
+    class APIConnectionError(Exception):
+        ...
 
 from .appointment_confirmation_service import AppointmentConfirmationService
 from .conversation_service import ConversationService
@@ -36,6 +49,17 @@ from ...interfaces.tools.patient_tool import FindPatientTool, SaveInteractionToo
 logger = logging.getLogger(__name__)
 
 _MAX_ITERATIONS = 8
+_LOOP_ABORT_THRESHOLD = 2  # aborta apos a (threshold+1)-esima ocorrencia da mesma chamada
+_LLM_RETRY_ATTEMPTS = 2
+_LLM_RETRY_BACKOFF_SECONDS = 1.5
+_LLM_BUSY_MESSAGE = (
+    "Estou com uma instabilidade momentanea por aqui 😕. "
+    "Pode me reenviar a sua ultima mensagem em alguns instantes, por favor?"
+)
+_TOOL_SAFE_ERROR = (
+    "Erro: nao consegui completar essa operacao agora. "
+    "Tente novamente em instantes ou siga com outra etapa do atendimento."
+)
 _SLOT_DATE_RE = re.compile(r"\b(\d{2}/\d{2}/\d{4})\b")
 _SLOT_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
 _SLOT_TOOLS = {"buscar_horarios_disponiveis", "buscar_proximo_dia_disponivel"}
@@ -60,16 +84,21 @@ def _is_offered_slot(datetime_str: str, state: Any) -> bool:
             return False
         if getattr(state, "earliest_time", "") and time_str < state.earliest_time:
             return False
-        if getattr(state, "requested_weekday", "") and str(dt.weekday()) != str(state.requested_weekday):
-            return False
+        _req_wd = getattr(state, "requested_weekday", "")
+        if _req_wd != "" and _req_wd is not None:
+            try:
+                if dt.weekday() != int(_req_wd):
+                    return False
+            except (TypeError, ValueError):
+                pass
         if not state.offered_date or not state.offered_times:
-            return True
+            return False
         return (
             date_str == state.offered_date
             and time_str in state.offered_times
         )
     except ValueError:
-        return True
+        return False
 
 
 def _has_valid_direct_plan(patient_phone: str, state: Any, config: ConfigService) -> bool:
@@ -82,6 +111,9 @@ def _has_valid_direct_plan(patient_phone: str, state: Any, config: ConfigService
         plan_name = str(candidate or "").strip()
         if not plan_name:
             continue
+        # AG-04: "Particular" is always a valid direct plan — no config lookup needed
+        if plan_name.lower() == "particular":
+            return True
         plan = config.get_plan_by_name(plan_name) or config.find_plan_fuzzy(plan_name)
         if plan and not plan.get("referral", False):
             return True
@@ -271,6 +303,11 @@ def _convert_history(history_text: str | None) -> list:
             content = line[len("ASSISTENTE:"):].strip()
             if content:
                 messages.append(AIMessage(content=content))
+        elif line.startswith("DENTISTA:"):
+            # AG-10: intervencao manual da dentista — incluida como contexto humano especial
+            content = line[len("DENTISTA:"):].strip()
+            if content:
+                messages.append(HumanMessage(content=f"[DENTISTA] {content}"))
     return messages
 
 
@@ -286,13 +323,43 @@ class CleanAgentService:
         llm = ChatOpenAI(
             model=os.getenv("OPENAI_MODEL", self.config.get_openai_model()),
             temperature=0,
+            request_timeout=float(os.getenv("OPENAI_REQUEST_TIMEOUT", "30")),
+            max_retries=int(os.getenv("OPENAI_MAX_RETRIES", "2")),
+            max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "700")),
         )
         self._llm = llm.bind_tools(self._tools)
 
+    def _invoke_llm(self, messages: list) -> AIMessage | None:
+        """Invoca o LLM com retry curto para instabilidade de rede.
+
+        Retorna ``None`` quando esgota as tentativas, para que o chamador
+        responda com uma mensagem amigavel em vez de propagar excecao/500.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, _LLM_RETRY_ATTEMPTS + 1):
+            try:
+                return self._llm.invoke(messages)
+            except (APITimeoutError, RateLimitError, APIConnectionError) as exc:
+                last_exc = exc
+                logger.warning(
+                    "[clean_agent] LLM instavel (tentativa %d/%d): %s",
+                    attempt,
+                    _LLM_RETRY_ATTEMPTS,
+                    exc,
+                )
+                if attempt < _LLM_RETRY_ATTEMPTS:
+                    time.sleep(_LLM_RETRY_BACKOFF_SECONDS * attempt)
+        logger.error(
+            "[clean_agent] LLM esgotou as tentativas: %s", last_exc, exc_info=True
+        )
+        return None
+
     def _run_loop(self, messages: list, patient_phone: str) -> str:
-        seen_calls: set[tuple] = set()
+        seen_call_counts: dict[tuple, int] = {}
         for iteration in range(_MAX_ITERATIONS):
-            response: AIMessage = self._llm.invoke(messages)
+            response = self._invoke_llm(messages)
+            if response is None:
+                return _LLM_BUSY_MESSAGE
 
             if not response.tool_calls:
                 return str(response.content).strip()
@@ -310,10 +377,30 @@ class CleanAgentService:
                     call["args"] = _apply_state_slot_filters(call.get("args", {}), state)
 
                 call_sig = (call["name"], str(sorted(call["args"].items())))
-                if call_sig in seen_calls:
-                    logger.warning("[clean_agent] loop detectado: %s repetido com mesmos args", call["name"])
+                seen_call_counts[call_sig] = seen_call_counts.get(call_sig, 0) + 1
+                if seen_call_counts[call_sig] > _LOOP_ABORT_THRESHOLD:
+                    logger.warning(
+                        "[clean_agent] loop detectado: %s repetido %dx com mesmos args — abortando",
+                        call["name"],
+                        seen_call_counts[call_sig],
+                    )
                     return "Desculpe, tive uma dificuldade interna. Por favor, tente novamente ou aguarde contato da clínica."
-                seen_calls.add(call_sig)
+
+                # Guarda de remarcacao: troca atomica so ocorre pelo fluxo deterministico
+                if call["name"] == "criar_agendamento" and state.intent == "reschedule":
+                    logger.warning(
+                        "[clean_agent] %s | criar_agendamento bloqueado: intent=reschedule "
+                        "(deve usar fluxo deterministico de troca atomica)",
+                        patient_phone,
+                    )
+                    result = (
+                        "Erro interno: remarcacao deve ser concluida pelo fluxo de selecao "
+                        "de horario (troca atomica), nao por criar_agendamento. Ofereca o "
+                        "novo horario e aguarde a escolha do paciente; a troca sera feita "
+                        "automaticamente."
+                    )
+                    messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
+                    continue
 
                 # Validação: criar_agendamento só executa com slot previamente ofertado
                 if call["name"] == "criar_agendamento":
@@ -353,8 +440,14 @@ class CleanAgentService:
                     try:
                         result = str(tool.invoke(call["args"]))
                     except Exception as exc:
-                        result = f"Erro em '{call['name']}': {exc}"
-                        logger.warning("[clean_agent] tool %s falhou: %s", call["name"], exc)
+                        # Nao vazar detalhe tecnico (stack/HttpError) para o LLM/paciente.
+                        logger.warning(
+                            "[clean_agent] tool %s falhou: %s",
+                            call["name"],
+                            exc,
+                            exc_info=True,
+                        )
+                        result = _TOOL_SAFE_ERROR
 
                 # Rastreamento: armazena slots ofertados para validação futura
                 if call["name"] in _SLOT_TOOLS:
@@ -367,6 +460,13 @@ class CleanAgentService:
                             "[clean_agent] %s | slots ofertados salvos: %s %s",
                             patient_phone, state.offered_date, state.offered_times,
                         )
+
+                # AG-07b: limpar slots apos agendamento bem-sucedido (evita re-oferta/double-booking)
+                if call["name"] == "criar_agendamento" and not result.startswith("Erro"):
+                    state = ConversationStateService.get(patient_phone)
+                    state.offered_date = ""
+                    state.offered_times = []
+                    ConversationStateService.save(patient_phone, state)
 
                 if call["name"] == "verificar_convenio" and "ENCAMINHAMENTO" not in result:
                     plan_name = str(call["args"].get("plan_name", "")).strip()
