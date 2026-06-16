@@ -34,7 +34,7 @@ metodologia Spec-Driven. A `000` preserva o trabalho de remarcação parcial já
 | 003 | Robustez do Estado Conversacional | 🟢 Concluída | 🔴 Crítica | Anti-crash de schema drift, TTL, reset limpo, handoff sem destruir contexto | CO-01/02/03/07/08, HO-01 | 13 |
 | 004 | Identidade do Paciente e Normalização de Telefone | 🟢 Concluída | 🔴 Crítica | Telefone canônico (9º dígito), fim do paciente duplicado/trocado, cadastro não-destrutivo | PH-01..05, PA-01/02 | 12 |
 | 005 | Cancelamento Seguro | 🟢 Concluída | 🔴 Crítica | Nunca declarar cancelamento sem confirmação real; não cancelar a consulta errada | WE-01, CO-04/02, CA-01, CA-06, CA-07 | 12 |
-| 006 | Remarcação Atômica e Criação Idempotente | 🟡 Planejada | 🔴 Crítica | Remarcação consistente em todos os caminhos; criação idempotente (sem double-booking) | AG-02/CA-02, CA-05, WH-01 | 11 |
+| 006 | Remarcação Atômica e Criação Idempotente | 🟢 Concluída | 🔴 Crítica | Remarcação consistente em todos os caminhos; criação idempotente (sem double-booking) | AG-02/CA-02, CA-05, WH-01 | 11 |
 | 007 | Regras de Agenda e Disponibilidade | 🟡 Planejada | 🟠 Alta | 2 dias úteis como fonte única; oferta↔criação coerentes; fuso/virada de ano/feriados | WE-05, AG-03/04/08, CA-03/07/08/09/10, WE-11, CO-05 | 15 |
 | 008 | Guarda de Escopo Robusto | 🟡 Planejada | 🟠 Alta | Bloquear preço/clínico (sem curto-circuito) sem expulsar paciente em fluxo legítimo | SC-01..06, AG-05, WE-07, CO-03 | 14 |
 | 009 | Mensageria Confiável e Alertas | 🟡 Planejada | 🟠 Alta | Mensagem chega ao paciente e alerta chega à doutora; retry; eco vs resposta manual | WH-02/03/04/05/06/08/09, CO-01, WE-02/HO-03, WE-12 | 13 |

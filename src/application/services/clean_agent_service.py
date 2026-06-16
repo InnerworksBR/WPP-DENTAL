@@ -368,6 +368,22 @@ class CleanAgentService:
                     return "Desculpe, tive uma dificuldade interna. Por favor, tente novamente ou aguarde contato da clínica."
                 seen_calls.add(call_sig)
 
+                # Guarda de remarcacao: troca atomica so ocorre pelo fluxo deterministico
+                if call["name"] == "criar_agendamento" and state.intent == "reschedule":
+                    logger.warning(
+                        "[clean_agent] %s | criar_agendamento bloqueado: intent=reschedule "
+                        "(deve usar fluxo deterministico de troca atomica)",
+                        patient_phone,
+                    )
+                    result = (
+                        "Erro interno: remarcacao deve ser concluida pelo fluxo de selecao "
+                        "de horario (troca atomica), nao por criar_agendamento. Ofereca o "
+                        "novo horario e aguarde a escolha do paciente; a troca sera feita "
+                        "automaticamente."
+                    )
+                    messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
+                    continue
+
                 # Validação: criar_agendamento só executa com slot previamente ofertado
                 if call["name"] == "criar_agendamento":
                     datetime_str = call["args"].get("datetime_str", "")

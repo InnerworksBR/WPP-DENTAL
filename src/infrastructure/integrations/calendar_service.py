@@ -537,6 +537,31 @@ class CalendarService:
             )
 
         with _APPOINTMENT_CREATION_LOCK:
+            # Idempotencia por (telefone, slot): reutiliza evento existente em reentregas
+            try:
+                existing = self.find_appointments_by_phone(patient_phone)
+                for evt in existing:
+                    start_str = evt.get("start", {}).get("dateTime", "")
+                    if start_str:
+                        evt_start = self._normalize_datetime(
+                            datetime.fromisoformat(start_str)
+                        )
+                        if evt_start == start_sp:
+                            logger.info(
+                                "create_appointment_if_available: evento existente reutilizado "
+                                "phone=%s slot=%s event_id=%s",
+                                patient_phone,
+                                start_sp.isoformat(),
+                                evt.get("id"),
+                            )
+                            return evt
+            except Exception as exc:
+                logger.warning(
+                    "create_appointment_if_available: erro na verificacao de idempotencia "
+                    "(prosseguindo com criacao normal): %s",
+                    exc,
+                )
+
             if self._slot_conflicts(start_sp, end_sp):
                 raise ValueError(
                     f"O horario {start_sp.strftime('%d/%m/%Y %H:%M')} nao esta mais disponivel."
