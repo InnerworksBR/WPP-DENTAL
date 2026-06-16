@@ -15,6 +15,18 @@ from src.infrastructure.integrations.calendar_service import CalendarService, SA
 
 
 # ---------------------------------------------------------------------------
+# Fixture: restaura ConfigService._configs (singleton) apos cada teste que o modifica
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _restore_config_singleton():
+    from src.infrastructure.config.config_service import ConfigService
+    original = ConfigService()._configs
+    yield
+    ConfigService()._configs = original
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

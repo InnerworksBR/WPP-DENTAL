@@ -50,6 +50,7 @@ class _DBMixin:
         os.environ["OPENAI_API_KEY"] = "test-key"
         from src.infrastructure.persistence.connection import close_db, init_db
         close_db()
+        self.db_path.unlink(missing_ok=True)
         init_db()
 
     def teardown_method(self):

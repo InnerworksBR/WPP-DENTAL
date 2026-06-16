@@ -201,20 +201,23 @@ class AppointmentConfirmationService:
     def _build_day_before_message(self, patient_name: str, start_time: datetime) -> str:
         first_name = (patient_name or "").strip().split()[0] if patient_name else ""
         start_sp = self._normalize_datetime(start_time)
+        date_str = start_sp.strftime("%d/%m/%Y")
+        time_str = start_sp.strftime("%H:%M")
         message = self.config.get_message(
             "appointment_confirmation.day_before",
             patient_name=first_name or "voce",
-            date=start_sp.strftime("%d/%m/%Y"),
-            time=start_sp.strftime("%H:%M"),
+            date=date_str,
+            time=time_str,
             doctor_name=self.config.get_doctor_name(),
         ).strip()
-        if message:
+        # Só usa mensagem do config se contiver a data — descarta fallback genérico de erro
+        if message and date_str in message:
             return message
         prefix = f"{first_name}, " if first_name else ""
         return (
             f"{prefix}passando para confirmar sua consulta de amanha.\n\n"
-            f"Data: {start_sp.strftime('%d/%m/%Y')}\n"
-            f"Horario: {start_sp.strftime('%H:%M')}\n\n"
+            f"Data: {date_str}\n"
+            f"Horario: {time_str}\n\n"
             "Voce consegue comparecer? Se precisar remarcar, me avise por aqui."
         )
 

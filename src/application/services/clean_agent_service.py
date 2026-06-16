@@ -461,6 +461,13 @@ class CleanAgentService:
                             patient_phone, state.offered_date, state.offered_times,
                         )
 
+                # AG-07b: limpar slots apos agendamento bem-sucedido (evita re-oferta/double-booking)
+                if call["name"] == "criar_agendamento" and not result.startswith("Erro"):
+                    state = ConversationStateService.get(patient_phone)
+                    state.offered_date = ""
+                    state.offered_times = []
+                    ConversationStateService.save(patient_phone, state)
+
                 if call["name"] == "verificar_convenio" and "ENCAMINHAMENTO" not in result:
                     plan_name = str(call["args"].get("plan_name", "")).strip()
                     plan = self.config.get_plan_by_name(plan_name) or self.config.find_plan_fuzzy(plan_name)
