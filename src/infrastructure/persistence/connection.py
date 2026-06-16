@@ -70,6 +70,17 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
     phone TEXT NOT NULL,
     content TEXT NOT NULL,
     message_id TEXT,
+    kind TEXT NOT NULL DEFAULT 'bot',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS pending_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    doctor_phone TEXT NOT NULL,
+    patient_phone TEXT NOT NULL,
+    patient_name TEXT,
+    message TEXT NOT NULL,
+    reason TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -171,6 +182,7 @@ def _run_migrations(db: sqlite3.Connection) -> None:
     _ensure_column(db, "processed_messages", "status", "TEXT NOT NULL DEFAULT 'processed'")
     _ensure_column(db, "processed_messages", "last_error", "TEXT")
     _ensure_column(db, "outbound_messages", "message_id", "TEXT")
+    _ensure_column(db, "outbound_messages", "kind", "TEXT NOT NULL DEFAULT 'bot'")
     _normalize_patient_phone_rows(db)
 
 

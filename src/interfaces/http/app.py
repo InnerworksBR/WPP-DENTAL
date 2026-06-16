@@ -90,6 +90,13 @@ async def lifespan(app: FastAPI):
     logger.info("Doutora: %s", config.get_doctor_name())
     logger.info("Planos ativos: %s", ", ".join(config.get_plan_names()))
     logger.info("Modelo LLM: %s", config.get_openai_model())
+    _doctor_phone = config.get_doctor_phone()
+    if not _doctor_phone:
+        logger.critical(
+            "DOCTOR_PHONE nao configurado ou invalido — alertas para a doutora serao silenciosamente "
+            "descartados. Configure a variavel de ambiente DOCTOR_PHONE ou o campo "
+            "settings.doctor.phone no config.yaml."
+        )
     scheduler_task = None
     if AppointmentConfirmationService.scheduler_enabled():
         scheduler_task = asyncio.create_task(_run_appointment_confirmation_scheduler())
@@ -870,26 +877,12 @@ def _capture_schedule_constraints(phone: str, text: str, state, history: list[di
     return changed
 
 
-def _split_response_messages(response_text: str) -> list[str]:
-    """Divide uma resposta em blocos curtos para envio no WhatsApp."""
-    chunks = []
-    for chunk in (response_text or "").split("\n\n"):
-        normalized = chunk.strip()
-        if normalized:
-            chunks.append(normalized)
-    return chunks or [response_text.strip()]
-
-
 async def _send_response(phone: str, response_text: str) -> bool:
-    """Envia uma resposta ao paciente, separando paragrafos quando fizer sentido."""
+    """Envia uma resposta ao paciente como mensagem única."""
     from ...infrastructure.integrations.whatsapp_service import WhatsAppService
 
     whatsapp = WhatsAppService()
-    for chunk in _split_response_messages(response_text):
-        delivered = await whatsapp.send_message(phone, chunk)
-        if not delivered:
-            return False
-    return True
+    return await whatsapp.send_message(phone, (response_text or "").strip())
 
 
 async def _handle_pending_slot_plan(
@@ -1400,21 +1393,53 @@ async def _handle_appointment_confirmation(
             state.stage = "idle"
             state.reschedule_event_id = event_id or state.reschedule_event_id
             state.reschedule_event_label = state.pending_event_label or state.reschedule_event_label
-            ConversationStateService.save(phone, state)
             response_text = "Certo, vamos remarcar. Para qual dia e periodo voce gostaria de remarcar?"
             delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver reschedule message")
+                raise HTTPException(status_code=502, detail="Failed to deliver reschedule message")
+            ConversationStateService.save(phone, state)
             if message_id:
                 _mark_message_processed(message_id, phone)
+            _resc_start = state.metadata.get(AppointmentConfirmationService.METADATA_START_KEY)
+            _resc_reminder = state.metadata.get(
+                AppointmentConfirmationService.METADATA_TYPE_KEY,
+                AppointmentConfirmationService.REMINDER_TYPE_DAY_BEFORE,
+            )
+            AppointmentConfirmationService.mark_patient_response(
+                event_id=event_id or "",
+                appointment_start=_resc_start or "",
+                status="rescheduled",
+                response_text=text,
+                reminder_type=_resc_reminder,
+            )
             ConversationService.add_message(phone, "patient", text)
             ConversationService.add_message(phone, "assistant", response_text)
             return JSONResponse({"status": "reschedule_requested", "phone": phone})
 
         if AppointmentOfferService.is_affirmative_confirmation(text):
             response_text = "Perfeito! Sua consulta esta confirmada. Nos vemos la! 😊"
-            ConversationStateService.clear(phone)
             delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver confirmation message")
+                raise HTTPException(status_code=502, detail="Failed to deliver confirmation message")
+            ConversationStateService.clear(phone)
             if message_id:
                 _mark_message_processed(message_id, phone)
+            _conf_start = state.metadata.get(AppointmentConfirmationService.METADATA_START_KEY)
+            _conf_reminder = state.metadata.get(
+                AppointmentConfirmationService.METADATA_TYPE_KEY,
+                AppointmentConfirmationService.REMINDER_TYPE_DAY_BEFORE,
+            )
+            AppointmentConfirmationService.mark_patient_response(
+                event_id=event_id or "",
+                appointment_start=_conf_start or "",
+                status="confirmed",
+                response_text=text,
+                reminder_type=_conf_reminder,
+            )
             ConversationService.add_message(phone, "patient", text)
             ConversationService.add_message(phone, "assistant", response_text)
             return JSONResponse({"status": "appointment_confirmed", "phone": phone})
@@ -1439,6 +1464,10 @@ async def _handle_appointment_confirmation(
         state.stage = "awaiting_cancel_confirmation"
         ConversationStateService.save(phone, state)
         delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver cancel confirmation request")
+            raise HTTPException(status_code=502, detail="Failed to deliver cancel confirmation request")
         if message_id:
             _mark_message_processed(message_id, phone)
         ConversationService.add_message(phone, "patient", text)
@@ -1470,6 +1499,10 @@ async def _handle_appointment_confirmation(
             )
             response_text = "Vou verificar isso com a Dra. Priscila e retorno o quanto antes."
             delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver cancel-failed-no-event-id message")
+                raise HTTPException(status_code=502, detail="Failed to deliver cancel-failed-no-event-id message")
             if message_id:
                 _mark_message_processed(message_id, phone)
             ConversationService.add_message(phone, "patient", text)
@@ -1480,8 +1513,12 @@ async def _handle_appointment_confirmation(
 
         if result.cancelled:
             response_text = "Consulta cancelada com sucesso. Se precisar agendar novamente, estou a disposicao!"
-            ConversationStateService.clear(phone)
             delivered = await _send_response(phone, response_text)
+            if not delivered:
+                if message_id:
+                    _mark_message_failed(message_id, phone, "Failed to deliver cancel success message")
+                raise HTTPException(status_code=502, detail="Failed to deliver cancel success message")
+            ConversationStateService.clear(phone)
             if message_id:
                 _mark_message_processed(message_id, phone)
             ConversationService.add_message(phone, "patient", text)
@@ -1512,6 +1549,10 @@ async def _handle_appointment_confirmation(
         )
         response_text = "Vou verificar isso com a Dra. Priscila e retorno o quanto antes."
         delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver cancel-failed message")
+            raise HTTPException(status_code=502, detail="Failed to deliver cancel-failed message")
         if message_id:
             _mark_message_processed(message_id, phone)
         ConversationService.add_message(phone, "patient", text)
@@ -1527,6 +1568,10 @@ async def _handle_appointment_confirmation(
             "Responda SIM para confirmar, NAO para cancelar ou REMARCAR para mudar o horario."
         )
         delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver confirmation reask")
+            raise HTTPException(status_code=502, detail="Failed to deliver confirmation reask")
         if message_id:
             _mark_message_processed(message_id, phone)
         ConversationService.add_message(phone, "patient", text)

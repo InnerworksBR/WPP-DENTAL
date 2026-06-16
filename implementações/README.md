@@ -3,7 +3,7 @@
 > **Índice do projeto (Spec-Driven Development).** Este arquivo é a fonte de verdade do
 > status e da ordem das implementações. Atualize-o sempre que uma implementação mudar de status.
 >
-> **Criado em:** 2026-06-15 · **Última atualização:** 2026-06-16 (impl 008 concluída)
+> **Criado em:** 2026-06-15 · **Última atualização:** 2026-06-16 (impl 009 concluída)
 
 ---
 
@@ -37,7 +37,7 @@ metodologia Spec-Driven. A `000` preserva o trabalho de remarcação parcial já
 | 006 | Remarcação Atômica e Criação Idempotente | 🟢 Concluída | 🔴 Crítica | Remarcação consistente em todos os caminhos; criação idempotente (sem double-booking) | AG-02/CA-02, CA-05, WH-01 | 11 |
 | 007 | Regras de Agenda e Disponibilidade | 🟢 Concluída | 🟠 Alta | 2 dias úteis como fonte única; oferta↔criação coerentes; fuso/virada de ano/feriados | WE-05, AG-03/04/08, CA-03/07/08/09/10, WE-11, CO-05 | 15 |
 | 008 | Guarda de Escopo Robusto | 🟢 Concluída | 🟠 Alta | Bloquear preço/clínico (sem curto-circuito) sem expulsar paciente em fluxo legítimo | SC-01..06, AG-05, WE-07, CO-03 | 14 |
-| 009 | Mensageria Confiável e Alertas | 🟡 Planejada | 🟠 Alta | Mensagem chega ao paciente e alerta chega à doutora; retry; eco vs resposta manual | WH-02/03/04/05/06/08/09, CO-01, WE-02/HO-03, WE-12 | 13 |
+| 009 | Mensageria Confiável e Alertas | 🟢 Concluída | 🟠 Alta | Mensagem chega ao paciente e alerta chega à doutora; retry; eco vs resposta manual | WH-02/03/04/05/06/08/09, CO-01, WE-02/HO-03, WE-12 | 13 |
 | 010 | Confirmação Proativa, Cron e Handoff | 🟡 Planejada | 🟡 Média | Heurística de confirmação/handoff robusta; cron com catch-up; janela de handoff | WE-08/CA-11, WE-13, HO-02, CO-04/05/06/07, AG-07/10 | 14 |
 | 011 | Configuração Resiliente e Limpeza de Engine | 🟢 Concluída | 🟠 Alta | YAML/reload/env à prova de falha; remover engine "langgraph" fantasma | CO-02/03/06/07/09/10, EN-02/03/04 | 12 |
 | 012 | Segurança do Webhook e Painel Admin | 🟢 Concluída | 🟠 Alta | Fechar webhook e painel admin; parar vazamento de segredos/PII em logs | WE-03, WE-09, CO-08, AD-01/02/03/04/06 | 14 |
