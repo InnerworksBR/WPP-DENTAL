@@ -4,7 +4,7 @@ from typing import Optional, Type
 
 from pydantic import BaseModel, Field
 
-from ...domain.policies.phone_service import build_phone_search_term, normalize_internal_phone
+from ...application.services.patient_service import PatientService
 from ...infrastructure.persistence.connection import get_db
 
 
@@ -27,20 +27,14 @@ class FindPatientTool:
     args_schema: Type[BaseModel] = FindPatientInput
 
     def _run(self, phone: str) -> str:
-        search_term = build_phone_search_term(phone)
-        db = get_db()
-        cursor = db.execute(
-            "SELECT name, phone, plan FROM patients WHERE phone LIKE ?",
-            (f"%{search_term}%",),
-        )
-        row = cursor.fetchone()
-
-        if row:
+        # PH-02: reusar PatientService.find_by_phone (match exato + fallback em memoria)
+        patient = PatientService.find_by_phone(phone)
+        if patient:
             return (
                 "Paciente encontrado!\n"
-                f"Nome: {row['name']}\n"
-                f"Telefone: {row['phone']}\n"
-                f"Convenio: {row['plan'] or 'Nao informado'}"
+                f"Nome: {patient['name']}\n"
+                f"Telefone: {patient['phone']}\n"
+                f"Convenio: {patient['plan'] or 'Nao informado'}"
             )
         return "Paciente nao encontrado no sistema. E um paciente novo."
 
@@ -65,31 +59,10 @@ class SavePatientTool:
     args_schema: Type[BaseModel] = SavePatientInput
 
     def _run(self, phone: str, name: str, plan: Optional[str] = None) -> str:
-        normalized_phone = normalize_internal_phone(phone)
-        search_term = build_phone_search_term(phone)
-        db = get_db()
-
-        cursor = db.execute(
-            "SELECT id FROM patients WHERE phone LIKE ?",
-            (f"%{search_term}%",),
-        )
-        existing = cursor.fetchone()
-
-        if existing:
-            db.execute(
-                "UPDATE patients SET phone = ?, name = ?, plan = ?, updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ?",
-                (normalized_phone, name, plan, existing["id"]),
-            )
-            db.commit()
-            return f"Paciente {name} atualizado com sucesso."
-
-        db.execute(
-            "INSERT INTO patients (phone, name, plan) VALUES (?, ?, ?)",
-            (normalized_phone, name, plan),
-        )
-        db.commit()
-        return f"Paciente {name} cadastrado com sucesso."
+        # PA-02: reusar PatientService.upsert (merge nao-destrutivo)
+        PatientService.upsert(phone, name, plan)
+        display = name.strip() if name and name.strip() else phone
+        return f"Paciente {display} salvo com sucesso."
 
 
 class SaveInteractionInput(BaseModel):
@@ -114,21 +87,15 @@ class SaveInteractionTool:
     args_schema: Type[BaseModel] = SaveInteractionInput
 
     def _run(self, phone: str, interaction_type: str, summary: str) -> str:
-        search_term = build_phone_search_term(phone)
-        db = get_db()
-
-        cursor = db.execute(
-            "SELECT id FROM patients WHERE phone LIKE ?",
-            (f"%{search_term}%",),
-        )
-        row = cursor.fetchone()
-
-        if not row:
+        # PH-02: reusar PatientService.find_by_phone (match exato + fallback em memoria)
+        patient = PatientService.find_by_phone(phone)
+        if not patient:
             return "Paciente nao encontrado. Cadastre-o antes de registrar interacoes."
 
+        db = get_db()
         db.execute(
             "INSERT INTO interactions (patient_id, type, summary) VALUES (?, ?, ?)",
-            (row["id"], interaction_type, summary),
+            (patient["id"], interaction_type, summary),
         )
         db.commit()
         return f"Interacao '{interaction_type}' registrada com sucesso."

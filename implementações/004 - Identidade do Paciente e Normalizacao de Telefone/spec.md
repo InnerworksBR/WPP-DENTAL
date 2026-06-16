@@ -1,7 +1,7 @@
 # Identidade do Paciente e Normalizacao de Telefone
 
 > **ID:** 004
-> **Status:** 🟡 Planejada
+> **Status:** 🟢 Concluída
 > **Prioridade:** 🔴 Critica
 > **Criada em:** 2026-06-15
 > **Última atualização:** 2026-06-15

@@ -661,7 +661,8 @@ class TestMainWebhook:
             ("Maria",),
         ).fetchone()
         assert patient is not None
-        assert patient["phone"] == "11999999999"
+        # PH-01: formato canônico = DDD(2) + 8 dígitos (9o dígito removido)
+        assert patient["phone"] == "1199999999"
 
     def test_slot_confirmation_cancels_previous_event_when_rescheduling(self, monkeypatch):
         import src.main as main

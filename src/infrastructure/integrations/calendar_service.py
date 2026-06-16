@@ -14,7 +14,11 @@ from zoneinfo import ZoneInfo
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-from ...domain.policies.phone_service import build_phone_search_term, normalize_internal_phone
+from ...domain.policies.phone_service import (
+    build_phone_search_term,
+    normalize_internal_phone,
+    phones_match,
+)
 from ..config.config_service import ConfigService
 
 SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
@@ -617,11 +621,8 @@ class CalendarService:
             summary_digits = self._normalize_phone(event.get("summary", ""))
             if not search_term:
                 continue
-            if (
-                summary_digits == phone_digits
-                or summary_digits.endswith(search_term)
-                or phone_digits.endswith(summary_digits)
-            ):
+            # PH-03: comparar por forma canonica para evitar casamento cruzado via endswith
+            if phones_match(summary_digits, phone_digits) or summary_digits == phone_digits:
                 matched_events.append(event)
 
         return matched_events
