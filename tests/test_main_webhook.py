@@ -61,26 +61,13 @@ class TestMainWebhook:
         assert response.status_code == 200
         assert response.json() == {"status": "ok", "service": "wpp-dental"}
 
-    def test_message_webhook_accepts_request_without_valid_auth_header(self, monkeypatch):
+    def test_message_webhook_rejects_request_without_valid_auth_header(self):
         import src.main as main
-
-        def fake_process_message(**kwargs):
-            return "Tudo certo"
-
-        async def fake_send_message(self, phone, message):
-            return True
-
-        monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
-        monkeypatch.setattr(
-            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
-            fake_send_message,
-        )
 
         with TestClient(main.app) as client:
             response = client.post("/webhook/message", json=_build_payload())
 
-        assert response.status_code == 200
-        assert response.json()["status"] == "processed"
+        assert response.status_code == 401
 
     def test_reload_config_still_rejects_unauthenticated_request(self):
         import src.main as main
@@ -90,11 +77,17 @@ class TestMainWebhook:
 
         assert response.status_code == 401
 
-    def test_webhook_accepts_request_without_auth_when_no_webhook_key_is_configured(self, monkeypatch):
+    def test_webhook_accepts_request_without_auth_when_no_key_is_configured_anywhere(self, monkeypatch, caplog):
+        import logging
         import src.main as main
 
         os.environ.pop("WEBHOOK_API_KEY", None)
-        os.environ["EVOLUTION_API_KEY"] = "evolution-only-key"
+        os.environ.pop("EVOLUTION_API_KEY", None)
+        os.environ.pop("EVOLUTION_WEBHOOK_API_KEY", None)
+
+        # Repor flag global para nao depender de ordem dos testes
+        import src.interfaces.http.app as app_module
+        app_module._webhook_auth_warning_logged = False
 
         def fake_process_message(**kwargs):
             return "Tudo certo"
@@ -108,11 +101,13 @@ class TestMainWebhook:
             fake_send_message,
         )
 
-        with TestClient(main.app) as client:
-            response = client.post("/webhook/message", json=_build_payload("no-key-1"))
+        with caplog.at_level(logging.CRITICAL, logger="wpp-dental"):
+            with TestClient(main.app) as client:
+                response = client.post("/webhook/message", json=_build_payload("no-key-1"))
 
         assert response.status_code == 200
         assert response.json()["status"] == "processed"
+        assert any("WEBHOOK EXPOSTO" in r.message for r in caplog.records)
 
     def test_webhook_accepts_evolution_api_key_when_webhook_key_is_configured(self, monkeypatch):
         import src.main as main
@@ -1549,3 +1544,107 @@ class TestMainWebhook:
 
         assert manual_message.status_code == 200
         assert manual_message.json()["status"] == "handoff_activated"
+
+
+# ---------------------------------------------------------------------------
+# T-012 — Testes de segurança do webhook (impl 012)
+# ---------------------------------------------------------------------------
+
+
+class TestWebhookSecurity:
+    """CA-001..CA-005: controle de acesso e redacao de PII no webhook."""
+
+    def setup_method(self):
+        self.db_path = Path("./data/test_webhook_security.db")
+        os.environ["DATABASE_PATH"] = str(self.db_path)
+        os.environ["WEBHOOK_API_KEY"] = "test-secret"
+        os.environ.pop("EVOLUTION_WEBHOOK_API_KEY", None)
+        os.environ.pop("EVOLUTION_API_KEY", None)
+
+        from src.infrastructure.persistence.connection import close_db
+        close_db()
+
+    def teardown_method(self):
+        from src.infrastructure.persistence.connection import close_db
+        close_db()
+        self.db_path.unlink(missing_ok=True)
+
+    def test_webhook_with_valid_header_key_is_accepted(self, monkeypatch):
+        """CA-003: chave valida em header -> 200."""
+        import src.main as main
+
+        monkeypatch.setattr(main.dental_crew, "process_message", lambda **k: "ok")
+        async def fake_send(self, p, m): return True
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send,
+        )
+
+        with TestClient(main.app) as client:
+            response = client.post(
+                "/webhook/message",
+                json=_build_payload("sec-1"),
+                headers={"apikey": "test-secret"},
+            )
+
+        assert response.status_code == 200
+
+    def test_webhook_with_no_header_is_rejected(self):
+        """CA-001: chave configurada mas nenhum header -> 401."""
+        import src.main as main
+
+        with TestClient(main.app) as client:
+            response = client.post("/webhook/message", json=_build_payload("sec-2"))
+
+        assert response.status_code == 401
+
+    def test_webhook_with_wrong_header_is_rejected(self):
+        """CA-001: chave configurada mas header errado -> 401."""
+        import src.main as main
+
+        with TestClient(main.app) as client:
+            response = client.post(
+                "/webhook/message",
+                json=_build_payload("sec-3"),
+                headers={"apikey": "wrong-key"},
+            )
+
+        assert response.status_code == 401
+
+    def test_webhook_key_in_body_is_rejected(self):
+        """CA-004: chave correta so no corpo do payload -> 401."""
+        import src.main as main
+
+        payload = _build_payload("sec-4")
+        payload["apikey"] = "test-secret"
+
+        with TestClient(main.app) as client:
+            response = client.post("/webhook/message", json=payload)
+
+        assert response.status_code == 401
+
+    def test_webhook_logs_do_not_contain_full_phone(self, monkeypatch, caplog):
+        """CA-005: logs nao contêm telefone completo em texto claro."""
+        import logging
+        import src.main as main
+
+        monkeypatch.setattr(main.dental_crew, "process_message", lambda **k: "ok")
+        async def fake_send(self, p, m): return True
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send,
+        )
+
+        with caplog.at_level(logging.INFO, logger="wpp-dental"):
+            with TestClient(main.app) as client:
+                client.post(
+                    "/webhook/message",
+                    json=_build_payload("sec-5"),
+                    headers={"apikey": "test-secret"},
+                )
+
+        full_phone = "5511999999999"
+        for record in caplog.records:
+            assert full_phone not in record.getMessage(), (
+                f"Log contem telefone completo: {record.getMessage()!r}"
+            )

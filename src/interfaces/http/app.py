@@ -42,7 +42,14 @@ from ...infrastructure.logging_config import setup_logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("wpp-dental")
 _webhook_auth_warning_logged = False
-_webhook_auth_mismatch_warning_logged = False
+
+
+def _redact_phone(phone: str) -> str:
+    """Retorna telefone com todos os digitos mascarados exceto os ultimos 4."""
+    digits = "".join(c for c in (phone or "") if c.isdigit())
+    if len(digits) <= 4:
+        return "****"
+    return "*" * (len(digits) - 4) + digits[-4:]
 
 
 async def _run_appointment_confirmation_scheduler() -> None:
@@ -156,9 +163,8 @@ async def receive_message(request: Request):
         payload,
         require_key=False,
         include_evolution_fallback=True,
-        allow_unauthorized=True,
     )
-    logger.debug("Webhook recebido: %s", payload)
+    logger.debug("Webhook recebido: event=%s from=%s", payload.get("event"), payload.get("instance"))
 
     event = payload.get("event", "")
     if event not in ("messages.upsert", "MESSAGES_UPSERT", "messages"):
@@ -193,7 +199,7 @@ async def receive_message(request: Request):
             message_id=message_id,
         )
 
-    logger.info("Mensagem de %s (%s): %s...", phone, contact_name, text[:50])
+    logger.info("Mensagem de %s (***): %s...", _redact_phone(phone), text[:20])
 
     if HandoffService.is_active(phone):
         expires_at = HandoffService.get_expires_at(phone)
@@ -529,12 +535,6 @@ def _extract_request_api_key(request: Request, payload: dict[str, Any] | None = 
         value = request.query_params.get(query_name)
         if value:
             return value.strip()
-
-    if isinstance(payload, dict):
-        for payload_key in ("apikey", "token", "key"):
-            value = payload.get(payload_key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
 
     return ""
 
@@ -1588,35 +1588,23 @@ def _authenticate_request(
     *,
     require_key: bool = True,
     include_evolution_fallback: bool = False,
-    allow_unauthorized: bool = False,
 ) -> None:
     """Valida se a chamada veio com a chave configurada."""
-    global _webhook_auth_warning_logged, _webhook_auth_mismatch_warning_logged
+    global _webhook_auth_warning_logged
 
     dedicated_keys, fallback_keys = _get_configured_api_keys(
         include_evolution_fallback=include_evolution_fallback
     )
     accepted_keys = dedicated_keys + fallback_keys
 
-    if not dedicated_keys:
-        if require_key:
-            if not accepted_keys:
-                logger.error("Webhook API key nao configurada.")
-                raise HTTPException(status_code=503, detail="Webhook authentication not configured")
-        else:
-            if not accepted_keys and not _webhook_auth_warning_logged:
-                logger.warning(
-                    "Webhook /webhook/message sem autenticacao dedicada configurada. "
-                    "Defina WEBHOOK_API_KEY para proteger esse endpoint."
-                )
-                _webhook_auth_warning_logged = True
-            return
-
     if not accepted_keys:
+        if require_key:
+            logger.error("Webhook API key nao configurada.")
+            raise HTTPException(status_code=503, detail="Webhook authentication not configured")
         if not _webhook_auth_warning_logged:
-            logger.warning(
-                "Webhook /webhook/message sem autenticacao dedicada configurada. "
-                "Defina WEBHOOK_API_KEY para proteger esse endpoint."
+            logger.critical(
+                "WEBHOOK EXPOSTO: nenhuma chave configurada (WEBHOOK_API_KEY). "
+                "Qualquer requisicao sera aceita. Defina a chave para fechar o endpoint."
             )
             _webhook_auth_warning_logged = True
         return
@@ -1626,14 +1614,6 @@ def _authenticate_request(
         hmac.compare_digest(provided_api_key, expected_api_key)
         for expected_api_key in accepted_keys
     ):
-        if allow_unauthorized:
-            if not _webhook_auth_mismatch_warning_logged:
-                logger.warning(
-                    "Webhook /webhook/message recebido sem chave valida. "
-                    "A requisicao sera aceita para compatibilidade com a Evolution."
-                )
-                _webhook_auth_mismatch_warning_logged = True
-            return
         raise HTTPException(status_code=401, detail="Unauthorized webhook request")
 
 

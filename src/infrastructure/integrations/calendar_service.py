@@ -380,6 +380,16 @@ class CalendarService:
         if not event_id:
             return False
         service = self._get_service()
+        try:
+            event = service.events().get(calendarId=self.calendar_id, eventId=event_id).execute()
+        except Exception:
+            return False
+        if not self.event_is_day_block(event):
+            logger.warning(
+                "delete_day_block: event_id=%s nao e um bloqueio — exclusao recusada",
+                event_id,
+            )
+            return False
         service.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()
         return True
 

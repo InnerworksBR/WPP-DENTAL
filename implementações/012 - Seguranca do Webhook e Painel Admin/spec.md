@@ -1,7 +1,7 @@
 # Segurança do Webhook e Painel Admin
 
 > **ID:** 012
-> **Status:** 🟡 Planejada
+> **Status:** 🟢 Concluída
 > **Prioridade:** 🟠 Alta
 > **Criada em:** 2026-06-15
 > **Última atualização:** 2026-06-15

@@ -76,7 +76,11 @@ class TestWebhookResilience:
         main = self._mock_io(monkeypatch, fake_process_message)
 
         with TestClient(main.app) as client:
-            response = client.post("/webhook/message", json=_build_payload("offload-1"))
+            response = client.post(
+                "/webhook/message",
+                json=_build_payload("offload-1"),
+                headers={"apikey": "test-secret"},
+            )
 
         assert response.status_code == 200
         # Se rodasse direto no handler async, haveria event loop na thread -> in_loop True.
@@ -97,7 +101,11 @@ class TestWebhookResilience:
                 raise sqlite3.OperationalError("database is locked")
 
             monkeypatch.setattr(app_module, "get_db", boom)
-            response = client.post("/webhook/message", json=_build_payload("claim-degraded-1"))
+            response = client.post(
+                "/webhook/message",
+                json=_build_payload("claim-degraded-1"),
+                headers={"apikey": "test-secret"},
+            )
 
         assert response.status_code == 200
         assert response.json()["status"] == "processed"

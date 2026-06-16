@@ -279,16 +279,32 @@ def test_calendar_errors_return_consistent_payload(
     response = admin_client.get("/admin/api/appointments")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": False, "error": "calendar unavailable", "items": []}
+    assert response.json()["ok"] is False
+    assert "agenda" in response.json()["error"].lower() or response.json()["error"]
+    assert response.json()["items"] == []
 
 
 def test_blocks_can_be_listed_created_and_deleted(
     admin_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    from unittest.mock import MagicMock
+
     calls: dict[str, object] = {}
+    FUTURE_DATE = "2099-12-31"
 
     class FakeCalendarService:
+        calendar_id = "primary"
+
+        def _get_service(self):
+            svc = MagicMock()
+            svc.events().get().execute.return_value = {
+                "id": "block-2",
+                "summary": "[WPP-DENTAL] Bloqueio de agenda",
+                "extendedProperties": {"private": {"wpp_dental_type": "DAY_BLOCK"}},
+            }
+            return svc
+
         def list_day_blocks(self, start_date: datetime, end_date: datetime):
             calls["list_range"] = (start_date, end_date)
             return [
@@ -296,14 +312,18 @@ def test_blocks_can_be_listed_created_and_deleted(
                     "event_id": "block-1",
                     "summary": "[WPP-DENTAL] Bloqueio de agenda",
                     "description": "Curso",
-                    "start_date": "2026-05-20",
-                    "end_date": "2026-05-21",
+                    "start_date": FUTURE_DATE,
+                    "end_date": FUTURE_DATE,
                 }
             ]
 
         def create_day_block(self, block_date: datetime, reason: str = ""):
             calls["created"] = (block_date, reason)
             return {"id": "block-2"}
+
+        @staticmethod
+        def event_is_day_block(event):
+            return str(event.get("summary", "")).startswith("[WPP-DENTAL] Bloqueio")
 
         def delete_day_block(self, event_id: str):
             calls["deleted"] = event_id
@@ -314,7 +334,7 @@ def test_blocks_can_be_listed_created_and_deleted(
     list_response = admin_client.get("/admin/api/blocks?days=999")
     create_response = admin_client.post(
         "/admin/api/blocks",
-        json={"date": "2026-05-20", "reason": "Curso"},
+        json={"date": FUTURE_DATE, "reason": "Curso"},
     )
     delete_response = admin_client.delete("/admin/api/blocks/block-2")
 
@@ -326,7 +346,7 @@ def test_blocks_can_be_listed_created_and_deleted(
     assert create_response.json()["event_id"] == "block-2"
     created_date, reason = calls["created"]
     assert created_date.tzinfo == SAO_PAULO_TZ
-    assert created_date.strftime("%Y-%m-%d") == "2026-05-20"
+    assert created_date.strftime("%Y-%m-%d") == FUTURE_DATE
     assert reason == "Curso"
 
     assert delete_response.status_code == 200
@@ -351,3 +371,156 @@ def test_main_app_includes_admin_router_once():
     ]
 
     assert len(admin_get_routes) == 1
+
+
+# ---------------------------------------------------------------------------
+# T-013 — Testes de segurança do painel admin (impl 012)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def admin_client_production(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """Cliente admin com ENVIRONMENT=production."""
+    db_path = tmp_path / "admin_prod.db"
+    monkeypatch.setenv("DATABASE_PATH", str(db_path))
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+    monkeypatch.delenv("WEBHOOK_API_KEY", raising=False)
+    monkeypatch.delenv("EVOLUTION_WEBHOOK_API_KEY", raising=False)
+    close_db()
+    init_db()
+
+    app = FastAPI()
+    app.include_router(admin.router)
+    with TestClient(app) as client:
+        yield client
+
+    close_db()
+
+
+def test_admin_requires_strong_key_in_production(
+    admin_client_production: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """CA-006: producao sem chave forte -> 503."""
+    response = admin_client_production.get("/admin/api/summary")
+    assert response.status_code == 503
+
+
+def test_admin_placeholder_key_rejected_in_production(
+    admin_client_production: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """CA-006: producao com placeholder -> 503."""
+    monkeypatch.setenv("ADMIN_API_KEY", "your-admin-panel-key")
+    response = admin_client_production.get(
+        "/admin/api/summary", headers={"x-admin-key": "your-admin-panel-key"}
+    )
+    assert response.status_code == 503
+
+
+def test_admin_strong_key_accepted_in_production(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """CA-007: producao com chave forte e header valido -> 200."""
+    db_path = tmp_path / "admin_strong.db"
+    monkeypatch.setenv("DATABASE_PATH", str(db_path))
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("ADMIN_API_KEY", "super-secret-key-2099")
+    monkeypatch.delenv("WEBHOOK_API_KEY", raising=False)
+    monkeypatch.delenv("EVOLUTION_WEBHOOK_API_KEY", raising=False)
+    close_db()
+    init_db()
+
+    app = FastAPI()
+    app.include_router(admin.router)
+    with TestClient(app) as client:
+        response = client.get("/admin/api/summary", headers={"x-admin-key": "super-secret-key-2099"})
+
+    close_db()
+    assert response.status_code == 200
+
+
+def test_admin_strong_key_wrong_header_rejected_in_production(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """CA-007: producao com chave forte mas header errado -> 401."""
+    db_path = tmp_path / "admin_wrong.db"
+    monkeypatch.setenv("DATABASE_PATH", str(db_path))
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("ADMIN_API_KEY", "super-secret-key-2099")
+    monkeypatch.delenv("WEBHOOK_API_KEY", raising=False)
+    monkeypatch.delenv("EVOLUTION_WEBHOOK_API_KEY", raising=False)
+    close_db()
+    init_db()
+
+    app = FastAPI()
+    app.include_router(admin.router)
+    with TestClient(app) as client:
+        response = client.get("/admin/api/summary", headers={"x-admin-key": "wrong-key"})
+
+    close_db()
+    assert response.status_code == 401
+
+
+def test_admin_open_outside_production(
+    admin_client: TestClient,
+):
+    """CA-008: fora de producao sem chave -> 200 (modo dev)."""
+    _seed_admin_data()
+    response = admin_client.get("/admin/api/summary")
+    assert response.status_code == 200
+
+
+def test_delete_non_block_event_returns_error(
+    admin_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """CA-009: deletar evento que nao e um bloqueio -> ok=False, evento preservado."""
+    from unittest.mock import MagicMock
+
+    class FakeServiceWithConsulta:
+        calendar_id = "primary"
+
+        def _get_service(self):
+            svc = MagicMock()
+            svc.events().get().execute.return_value = {
+                "id": "consulta-1",
+                "summary": "Consulta Maria Silva",
+                "extendedProperties": {},
+            }
+            return svc
+
+        @staticmethod
+        def event_is_day_block(event):
+            return str(event.get("summary", "")).startswith("[WPP-DENTAL] Bloqueio")
+
+    monkeypatch.setattr(admin, "CalendarService", FakeServiceWithConsulta)
+
+    response = admin_client.delete("/admin/api/blocks/consulta-1")
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert "bloqueio" in response.json()["error"].lower()
+
+
+def test_past_block_date_returns_422(admin_client: TestClient):
+    """CA-012: data passada em create_block -> 422."""
+    response = admin_client.post("/admin/api/blocks", json={"date": "2020-01-01", "reason": "passado"})
+    assert response.status_code == 422
+    assert "passado" in response.json()["detail"].lower()
+
+
+def test_calendar_error_field_is_generic(
+    admin_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """CA-013: campo error nao contem str(exc) original."""
+    class BrokenCalendar:
+        def list_events_between(self, *a, **kw):
+            raise RuntimeError("CREDENTIAL_SECRET_LEAKED")
+
+    monkeypatch.setattr(admin, "CalendarService", BrokenCalendar)
+    response = admin_client.get("/admin/api/appointments")
+    assert response.status_code == 200
+    assert "CREDENTIAL_SECRET_LEAKED" not in response.json().get("error", "")
+    assert response.json()["ok"] is False

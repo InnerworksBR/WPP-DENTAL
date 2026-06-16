@@ -210,6 +210,10 @@ class _DBMixin:
         from src.infrastructure.persistence.connection import close_db, init_db
         self.db_path = Path("./data/test_cancel_safe.db")
         os.environ["DATABASE_PATH"] = str(self.db_path)
+        # Garante estado limpo de autenticacao (independente de ordem de testes)
+        os.environ["WEBHOOK_API_KEY"] = "test-secret"
+        os.environ.pop("EVOLUTION_API_KEY", None)
+        os.environ.pop("EVOLUTION_WEBHOOK_API_KEY", None)
         close_db()
         init_db()
 
