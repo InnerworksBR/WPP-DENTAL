@@ -52,6 +52,29 @@ def _redact_phone(phone: str) -> str:
     return "*" * (len(digits) - 4) + digits[-4:]
 
 
+_HANDOFF_MARKERS = (
+    "vou encaminhar para",
+    "entrara em contato",
+    "sera notificada",
+    "vou encaminhar",
+    "vai conferir e te orientar",
+)
+_HANDOFF_NEG_PREFIXES = ("nao vou", "nao vai", "nao vamos", "nunca ", "sem ", "nao ")
+_HANDOFF_NEG_WINDOW = 30
+
+
+def _response_triggers_handoff(normalized_resp: str) -> bool:
+    """WE-13: retorna True somente se a resposta contem marcador de handoff sem negacao proxima."""
+    for marker in _HANDOFF_MARKERS:
+        idx = normalized_resp.find(marker)
+        if idx == -1:
+            continue
+        window = normalized_resp[max(0, idx - _HANDOFF_NEG_WINDOW): idx]
+        if not any(neg in window for neg in _HANDOFF_NEG_PREFIXES):
+            return True
+    return False
+
+
 async def _run_appointment_confirmation_scheduler() -> None:
     """Executa o cron interno diario para confirmar consultas do dia seguinte."""
     service = AppointmentConfirmationService()
@@ -99,6 +122,13 @@ async def lifespan(app: FastAPI):
         )
     scheduler_task = None
     if AppointmentConfirmationService.scheduler_enabled():
+        # CO-04: catch-up — enviar lembretes perdidos por restart ou queda
+        try:
+            _catchup_stats = await AppointmentConfirmationService().run_catchup_if_missed()
+            if _catchup_stats is not None:
+                logger.info("Catch-up de confirmacoes executado no startup: %s", _catchup_stats)
+        except Exception as _catchup_exc:
+            logger.error("Falha no catch-up de confirmacoes no startup: %s", _catchup_exc, exc_info=True)
         scheduler_task = asyncio.create_task(_run_appointment_confirmation_scheduler())
         app.state.appointment_confirmation_scheduler = scheduler_task
         logger.info(
@@ -215,6 +245,8 @@ async def receive_message(request: Request):
             phone,
             expires_at.isoformat(timespec="seconds") if expires_at else "desconhecido",
         )
+        # HO-02: estender a janela a cada mensagem do paciente, ate o teto maximo
+        HandoffService.extend(phone)
         ConversationService.add_message(phone, "patient", text)
         if message_id:
             _mark_message_processed(message_id, phone)
@@ -352,13 +384,7 @@ async def receive_message(request: Request):
         )
 
     normalized_resp = unicodedata.normalize("NFKD", response_text or "").encode("ascii", "ignore").decode("ascii").lower()
-    if any(marker in normalized_resp for marker in [
-        "vou encaminhar para",
-        "entrara em contato",
-        "sera notificada",
-        "vou encaminhar",
-        "vai conferir e te orientar",
-    ]):
+    if _response_triggers_handoff(normalized_resp):
         HandoffService.activate(phone)
         logger.info("Handoff ativado automaticamente apos resposta da IA para %s", phone)
 
@@ -1388,7 +1414,7 @@ async def _handle_appointment_confirmation(
 
     # --- Somente em CONFIRMATION_STAGE: remarcar e confirmar consulta ---
     if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
-        if any(token in normalized for token in ("remarcar", "reagendar", "mudar", "outro horario")):
+        if AppointmentOfferService.has_change_request(text):
             state.intent = "reschedule"
             state.stage = "idle"
             state.reschedule_event_id = event_id or state.reschedule_event_id
@@ -1419,6 +1445,19 @@ async def _handle_appointment_confirmation(
             return JSONResponse({"status": "reschedule_requested", "phone": phone})
 
         if AppointmentOfferService.is_affirmative_confirmation(text):
+            # T-003: conflito — afirmativo + pedido de mudanca → pede esclarecimento
+            if AppointmentOfferService.has_change_request(text):
+                response_text = "Nao entendi bem — voce quer confirmar a consulta ou prefere remarcar para outro horario?"
+                delivered = await _send_response(phone, response_text)
+                if not delivered:
+                    if message_id:
+                        _mark_message_failed(message_id, phone, "Failed to deliver ambiguous-confirmation clarification")
+                    raise HTTPException(status_code=502, detail="Failed to deliver ambiguous-confirmation clarification")
+                if message_id:
+                    _mark_message_processed(message_id, phone)
+                ConversationService.add_message(phone, "patient", text)
+                ConversationService.add_message(phone, "assistant", response_text)
+                return JSONResponse({"status": "ambiguous_confirmation_clarification", "phone": phone})
             response_text = "Perfeito! Sua consulta esta confirmada. Nos vemos la! 😊"
             delivered = await _send_response(phone, response_text)
             if not delivered:

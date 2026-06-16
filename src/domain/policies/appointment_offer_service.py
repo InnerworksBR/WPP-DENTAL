@@ -88,6 +88,17 @@ class AppointmentOfferService:
         "outro horario",
         "outra opcao",
     )
+    _CHANGE_REQUEST_TOKENS = (
+        "remarcar",
+        "reagendar",
+        "mudar",
+        "trocar",
+        "outro horario",
+        "outra opcao",
+        "outro dia",
+        "outra data",
+        "outra hora",
+    )
     _REJECTION_TOKENS = (
         "nao quero",
         "nao queria",
@@ -289,7 +300,17 @@ class AppointmentOfferService:
             return False
         if any(token in normalized for token in cls._NEGATIVE_CONFIRMATION_TOKENS):
             return False
-        return any(token in normalized for token in cls._AFFIRMATIVE_CONFIRMATION_TOKENS)
+        # Word-boundary match: evita "assim" ativar "sim", "okdoutora" ativar "ok"
+        for token in cls._AFFIRMATIVE_CONFIRMATION_TOKENS:
+            if re.search(r"\b" + re.escape(token) + r"\b", normalized):
+                return True
+        return False
+
+    @classmethod
+    def has_change_request(cls, patient_message: str) -> bool:
+        """Indica se o paciente pediu mudanca/troca de horario ou dia."""
+        normalized = cls._normalize(patient_message)
+        return any(token in normalized for token in cls._CHANGE_REQUEST_TOKENS)
 
     @classmethod
     def extract_request_constraints(cls, patient_message: str) -> AppointmentRequestConstraints:
