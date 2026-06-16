@@ -1623,6 +1623,37 @@ class TestWebhookSecurity:
 
         assert response.status_code == 401
 
+    def test_webhook_auth_disabled_flag_accepts_request_without_key(self, monkeypatch):
+        """WEBHOOK_AUTH_DISABLED=true -> /webhook/message aceita sem chave (Evolution v2)."""
+        import src.main as main
+
+        os.environ["WEBHOOK_AUTH_DISABLED"] = "true"
+        monkeypatch.setattr(main.dental_crew, "process_message", lambda **k: "ok")
+        async def fake_send(self, p, m): return True
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
+            fake_send,
+        )
+
+        try:
+            with TestClient(main.app) as client:
+                response = client.post("/webhook/message", json=_build_payload("sec-disabled"))
+            assert response.status_code == 200
+        finally:
+            os.environ.pop("WEBHOOK_AUTH_DISABLED", None)
+
+    def test_reload_config_stays_protected_even_when_webhook_auth_disabled(self):
+        """WEBHOOK_AUTH_DISABLED nao afeta o endpoint administrativo de reload."""
+        import src.main as main
+
+        os.environ["WEBHOOK_AUTH_DISABLED"] = "true"
+        try:
+            with TestClient(main.app) as client:
+                response = client.post("/webhook/reload-config")
+            assert response.status_code == 401
+        finally:
+            os.environ.pop("WEBHOOK_AUTH_DISABLED", None)
+
     def test_webhook_logs_do_not_contain_full_phone(self, monkeypatch, caplog):
         """CA-005: logs nao contêm telefone completo em texto claro."""
         import logging

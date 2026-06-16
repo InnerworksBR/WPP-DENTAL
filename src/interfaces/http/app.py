@@ -195,12 +195,16 @@ async def receive_message(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
 
-    _authenticate_request(
-        request,
-        payload,
-        require_key=False,
-        include_evolution_fallback=True,
-    )
+    # A Evolution API v2 envia a apikey apenas no corpo JSON (nao em header), o que
+    # nao e aceito pela validacao. Quando WEBHOOK_AUTH_DISABLED=true, a autenticacao
+    # do endpoint de mensagens e pulada (o /webhook/reload-config segue protegido).
+    if not _webhook_auth_disabled():
+        _authenticate_request(
+            request,
+            payload,
+            require_key=False,
+            include_evolution_fallback=True,
+        )
     logger.debug("Webhook recebido: event=%s from=%s", payload.get("event"), payload.get("instance"))
 
     event = payload.get("event", "")
@@ -537,6 +541,16 @@ def _handle_outbound_message(
             "handoff_until": expires_at.replace(microsecond=0).isoformat(),
         }
     )
+
+
+def _webhook_auth_disabled() -> bool:
+    """Indica se a autenticacao do webhook de mensagens foi desativada via env.
+
+    A Evolution API v2 envia a apikey apenas no corpo JSON do webhook, formato que a
+    validacao por header/query nao reconhece. Para integracoes onde nao ha como
+    configurar um header, este flag desliga a auth apenas do /webhook/message.
+    """
+    return os.getenv("WEBHOOK_AUTH_DISABLED", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _get_configured_api_keys(
