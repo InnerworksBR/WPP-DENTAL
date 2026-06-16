@@ -39,7 +39,7 @@ metodologia Spec-Driven. A `000` preserva o trabalho de remarcação parcial já
 | 008 | Guarda de Escopo Robusto | 🟡 Planejada | 🟠 Alta | Bloquear preço/clínico (sem curto-circuito) sem expulsar paciente em fluxo legítimo | SC-01..06, AG-05, WE-07, CO-03 | 14 |
 | 009 | Mensageria Confiável e Alertas | 🟡 Planejada | 🟠 Alta | Mensagem chega ao paciente e alerta chega à doutora; retry; eco vs resposta manual | WH-02/03/04/05/06/08/09, CO-01, WE-02/HO-03, WE-12 | 13 |
 | 010 | Confirmação Proativa, Cron e Handoff | 🟡 Planejada | 🟡 Média | Heurística de confirmação/handoff robusta; cron com catch-up; janela de handoff | WE-08/CA-11, WE-13, HO-02, CO-04/05/06/07, AG-07/10 | 14 |
-| 011 | Configuração Resiliente e Limpeza de Engine | 🟡 Planejada | 🟠 Alta | YAML/reload/env à prova de falha; remover engine "langgraph" fantasma | CO-02/03/06/07/09/10, EN-02/03/04 | 12 |
+| 011 | Configuração Resiliente e Limpeza de Engine | 🟢 Concluída | 🟠 Alta | YAML/reload/env à prova de falha; remover engine "langgraph" fantasma | CO-02/03/06/07/09/10, EN-02/03/04 | 12 |
 | 012 | Segurança do Webhook e Painel Admin | 🟡 Planejada | 🟠 Alta | Fechar webhook e painel admin; parar vazamento de segredos/PII em logs | WE-03, WE-09, CO-08, AD-01/02/03/04/06 | 14 |
 
 **Legenda de status:** 🟡 Planejada · 🔵 Em Andamento · 🟢 Concluída · 🔴 Bloqueada · ⚪ Cancelada.
