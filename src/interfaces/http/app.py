@@ -1518,6 +1518,21 @@ async def _handle_appointment_confirmation(
         ConversationService.add_message(phone, "assistant", response_text)
         return JSONResponse({"status": "cancel_failed", "phone": phone})
 
+    # CO-03: deterministic fallback when CONFIRMATION_STAGE receives an unrecognized message
+    # — never let it fall through to the LLM during an active confirmation flow
+    if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
+        label = state.pending_event_label or "sua consulta"
+        response_text = (
+            f"Por favor, confirme se voce ira comparecer a {label}. "
+            "Responda SIM para confirmar, NAO para cancelar ou REMARCAR para mudar o horario."
+        )
+        delivered = await _send_response(phone, response_text)
+        if message_id:
+            _mark_message_processed(message_id, phone)
+        ConversationService.add_message(phone, "patient", text)
+        ConversationService.add_message(phone, "assistant", response_text)
+        return JSONResponse({"status": "confirmation_reask", "phone": phone})
+
     return None
 
 
@@ -1565,7 +1580,18 @@ async def _handle_scope_escalation(
     )
 
     response_text = _get_patient_escalation_message()
-    ConversationStateService.clear(phone)
+
+    # WE-07: only clear state when there's no active agenda (pending slot, reschedule, etc.)
+    _esc_state = ConversationStateService.get(phone)
+    _has_active_agenda = bool(
+        _esc_state.pending_slot_date
+        or _esc_state.pending_slot_time
+        or _esc_state.pending_event_id
+        or _esc_state.reschedule_event_id
+        or getattr(_esc_state, "intent", "") == "reschedule"
+    )
+    if not _has_active_agenda:
+        ConversationStateService.clear(phone)
 
     delivered = await _send_response(phone, response_text)
     if not delivered:

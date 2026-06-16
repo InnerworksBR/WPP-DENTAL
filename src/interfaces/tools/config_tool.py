@@ -54,10 +54,14 @@ class CheckPlanTool:
 
         restrictions = plan.get("restrictions", [])
         if restrictions:
-            result += f"Restrições: {', '.join(restrictions)}\n"
-            result += "Estes procedimentos NÃO são cobertos por este convênio."
+            # AG-05: don't expose restriction details to the patient — keep internal
+            result += (
+                "Atencao: este convenio possui procedimentos com cobertura limitada. "
+                "Solicite foto da carteirinha e informe ao paciente que a Dra. Priscila "
+                "vai verificar a cobertura antes de confirmar o agendamento."
+            )
         else:
-            result += "Sem restrições de procedimentos."
+            result += "Cobertura completa confirmada para este convenio."
 
         return result
 
