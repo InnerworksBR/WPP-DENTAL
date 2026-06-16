@@ -1,6 +1,7 @@
 """Servidor webhook principal do WPP-DENTAL."""
 
 import asyncio
+import dataclasses
 import hmac
 import logging
 import os
@@ -228,6 +229,19 @@ async def receive_message(request: Request):
         )
         current_state = ConversationState()
 
+    # CO-07: TTL de 60 min para stages awaiting_* — evita conversas presas para sempre
+    if current_state.stage.startswith("awaiting_"):
+        last_updated = ConversationStateService.get_updated_at(phone)
+        if last_updated and (datetime.utcnow() - last_updated) > timedelta(minutes=60):
+            logger.info(
+                "TTL expirado para %s (stage=%s, updated_at=%s); resetando para idle",
+                phone,
+                current_state.stage,
+                last_updated.isoformat(),
+            )
+            current_state = _reset_to_idle(current_state)
+            ConversationStateService.save(phone, current_state)
+
     escalation_response = await _handle_scope_escalation(
         phone=phone,
         text=text,
@@ -236,6 +250,16 @@ async def receive_message(request: Request):
     )
     if escalation_response is not None:
         return escalation_response
+
+    if current_state.stage == "awaiting_name_for_slot_confirmation":
+        name_response = await _handle_pending_slot_name(
+            phone=phone,
+            text=text,
+            contact_name=contact_name,
+            message_id=message_id,
+        )
+        if name_response is not None:
+            return name_response
 
     if current_state.stage == "awaiting_plan_for_slot_confirmation":
         plan_response = await _handle_pending_slot_plan(
@@ -536,6 +560,14 @@ def _save_patient_if_missing(phone: str, patient_name: str) -> None:
     """Cria um cadastro minimo quando o paciente ainda nao existe."""
     state = ConversationStateService.get(phone)
     PatientService.upsert(phone, patient_name, state.plan_name or None)
+
+
+def _reset_to_idle(state: ConversationState) -> ConversationState:
+    """CO-08: Reseta todos os campos do estado para os defaults (stage='idle')."""
+    defaults = ConversationState()
+    for f in dataclasses.fields(ConversationState):
+        setattr(state, f.name, getattr(defaults, f.name))
+    return state
 
 
 def _resolve_valid_plan_name(phone: str) -> str:
@@ -912,6 +944,75 @@ async def _handle_pending_slot_plan(
     return JSONResponse(
         {
             "status": "pending_slot_plan_resolved",
+            "phone": phone,
+            "response_preview": response_text[:100],
+        }
+    )
+
+
+async def _handle_pending_slot_name(
+    phone: str,
+    text: str,
+    contact_name: str,
+    message_id: str,
+):
+    """CO-03: Recebe o nome do paciente quando stage==awaiting_name_for_slot_confirmation."""
+    state = ConversationStateService.get(phone)
+    if state.stage != "awaiting_name_for_slot_confirmation":
+        return None
+    if not state.pending_slot_date or not state.pending_slot_time:
+        ConversationStateService.clear(phone)
+        return None
+
+    raw_name = text.strip()
+    is_placeholder = (
+        not raw_name
+        or raw_name.replace("+", "").isdigit()
+        or len(raw_name) < 3
+    )
+    if is_placeholder:
+        response_text = (
+            "Preciso do seu nome completo para confirmar a consulta.\n"
+            "Pode me dizer seu nome, por favor?"
+        )
+        delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver name request")
+            raise HTTPException(status_code=502, detail="Failed to deliver name request")
+        ConversationService.add_message(phone, "patient", text)
+        ConversationService.add_message(phone, "assistant", response_text)
+        if message_id:
+            _mark_message_processed(message_id, phone)
+        return JSONResponse({"status": "awaiting_name", "phone": phone})
+
+    pending_date = state.pending_slot_date
+    pending_time = state.pending_slot_time
+    plan_name = state.plan_name or None
+    state.patient_name = raw_name
+    _reset_to_idle(state)
+    ConversationStateService.save(phone, state)
+    PatientService.upsert(phone, raw_name, plan_name)
+
+    response_text = _build_slot_confirmation_request_message(
+        patient_name=raw_name,
+        date_str=pending_date,
+        time_str=pending_time,
+    )
+    delivered = await _send_response(phone, response_text)
+    if not delivered:
+        if message_id:
+            _mark_message_failed(message_id, phone, "Failed to deliver slot confirmation after name")
+        raise HTTPException(status_code=502, detail="Failed to deliver slot confirmation after name")
+
+    ConversationService.add_message(phone, "patient", text)
+    ConversationService.add_message(phone, "assistant", response_text)
+    if message_id:
+        _mark_message_processed(message_id, phone)
+
+    return JSONResponse(
+        {
+            "status": "pending_slot_name_resolved",
             "phone": phone,
             "response_preview": response_text[:100],
         }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import sqlite3
@@ -76,7 +77,22 @@ class ConversationStateService:
         if not isinstance(metadata, dict):
             payload["metadata"] = {}
 
-        return ConversationState(**payload)
+        # CO-01: ignorar campos desconhecidos para sobreviver a schema drift
+        valid_fields = {f.name for f in dataclasses.fields(ConversationState)}
+        filtered = {k: v for k, v in payload.items() if k in valid_fields}
+        state = ConversationState(**filtered)
+
+        # CO-02: garantir que campos list nunca chegam como None
+        for list_field in ("offered_times", "rejected_slots", "excluded_dates"):
+            if not isinstance(getattr(state, list_field), list):
+                setattr(state, list_field, [])
+
+        # CO-02: garantir que campos str nunca chegam como None
+        for f in dataclasses.fields(ConversationState):
+            if isinstance(f.default, str) and getattr(state, f.name) is None:
+                setattr(state, f.name, f.default)
+
+        return state
 
     @staticmethod
     def save(phone: str, state: ConversationState) -> None:

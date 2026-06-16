@@ -31,15 +31,11 @@ class HandoffService:
     def activate(cls, phone: str, duration_minutes: int | None = None) -> datetime:
         """Ativa o handoff manual para o telefone informado."""
         expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes or cls.WINDOW_MINUTES)
-        ConversationStateService.save(
-            phone,
-            ConversationState(
-                stage=cls.STAGE,
-                metadata={
-                    cls.METADATA_UNTIL_KEY: expires_at.replace(microsecond=0).isoformat(),
-                },
-            ),
-        )
+        # HO-01: preservar contexto de agenda para retomada após handoff
+        current = ConversationStateService.get(phone)
+        current.stage = cls.STAGE
+        current.metadata = {cls.METADATA_UNTIL_KEY: expires_at.replace(microsecond=0).isoformat()}
+        ConversationStateService.save(phone, current)
         return expires_at
 
     @classmethod
