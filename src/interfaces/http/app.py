@@ -33,7 +33,7 @@ from ...domain.policies.appointment_offer_service import (
 from ...domain.policies.phone_service import normalize_conversation_phone, normalize_internal_phone
 from ...domain.policies.scope_guard_service import ScopeGuardService
 from ...infrastructure.config.config_service import ConfigService
-from ...infrastructure.integrations.calendar_service import CalendarService
+from ...infrastructure.integrations.calendar_service import CalendarService, CancelResult
 from ...infrastructure.persistence import OutboundMessageStore
 from ...infrastructure.persistence.connection import close_db, get_db, init_db
 
@@ -271,7 +271,10 @@ async def receive_message(request: Request):
         if plan_response is not None:
             return plan_response
 
-    if current_state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
+    if current_state.stage in {
+        AppointmentConfirmationService.CONFIRMATION_STAGE,
+        "awaiting_cancel_confirmation",
+    }:
         confirmation_response = await _handle_appointment_confirmation(
             phone=phone,
             text=text,
@@ -1162,7 +1165,7 @@ async def _handle_offered_slot_selection(
             if state.intent == "reschedule":
                 new_event_id = _get_event_id(new_event)
                 cancelled = calendar.cancel_appointment(state.reschedule_event_id)
-                if not cancelled:
+                if not cancelled.cancelled:
                     _preserve_partial_reschedule_state(
                         phone=phone,
                         state=state,
@@ -1353,6 +1356,13 @@ async def _handle_offered_slot_selection(
     )
 
 
+_EXPLICIT_CANCEL_TOKENS = (
+    "cancelar", "desmarcar", "nao vou", "nao quero", "quero cancelar",
+    "pode cancelar", "cancela", "cancele",
+)
+_AMBIGUOUS_CANCEL_TOKENS = ("nao sei", "talvez", "ainda nao", "nao tenho certeza", "nao to")
+
+
 async def _handle_appointment_confirmation(
     phone: str,
     text: str,
@@ -1364,49 +1374,143 @@ async def _handle_appointment_confirmation(
     event_id = state.metadata.get(AppointmentConfirmationService.METADATA_EVENT_ID_KEY) or state.pending_event_id
 
     normalized = AppointmentOfferService._normalize(text)
-    
-    if any(token in normalized for token in ("remarcar", "reagendar", "mudar", "outro horario")):
-        state.intent = "reschedule"
-        state.stage = "idle"
-        state.reschedule_event_id = event_id or state.reschedule_event_id
-        state.reschedule_event_label = state.pending_event_label or state.reschedule_event_label
-        ConversationStateService.save(phone, state)
-        response_text = "Certo, vamos remarcar. Para qual dia e periodo voce gostaria de remarcar?"
-        
-        delivered = await _send_response(phone, response_text)
-        if message_id:
-            _mark_message_processed(message_id, phone)
-            
-        ConversationService.add_message(phone, "patient", text)
-        ConversationService.add_message(phone, "assistant", response_text)
-        return JSONResponse({"status": "reschedule_requested", "phone": phone})
 
-    if AppointmentOfferService.is_affirmative_confirmation(text):
-        response_text = "Perfeito! Sua consulta esta confirmada. Nos vemos la! 😊"
-        ConversationStateService.clear(phone)
-        
+    # --- PRIORIDADE: confirmar cancelamento pendente ---
+    # Quando paciente está em awaiting_cancel_confirmation, verificamos ANTES de qualquer outra coisa
+    if state.stage == "awaiting_cancel_confirmation":
+        if AppointmentOfferService.is_affirmative_confirmation(text):
+            # Confirmou o cancelamento — cai para o bloco de cancel explícito abaixo
+            pass
+        else:
+            # Não confirmou cancelamento; volta ao idle e deixa LLM tratar
+            state.stage = "idle"
+            ConversationStateService.save(phone, state)
+            return None
+
+    # --- Somente em CONFIRMATION_STAGE: remarcar e confirmar consulta ---
+    if state.stage == AppointmentConfirmationService.CONFIRMATION_STAGE:
+        if any(token in normalized for token in ("remarcar", "reagendar", "mudar", "outro horario")):
+            state.intent = "reschedule"
+            state.stage = "idle"
+            state.reschedule_event_id = event_id or state.reschedule_event_id
+            state.reschedule_event_label = state.pending_event_label or state.reschedule_event_label
+            ConversationStateService.save(phone, state)
+            response_text = "Certo, vamos remarcar. Para qual dia e periodo voce gostaria de remarcar?"
+            delivered = await _send_response(phone, response_text)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            return JSONResponse({"status": "reschedule_requested", "phone": phone})
+
+        if AppointmentOfferService.is_affirmative_confirmation(text):
+            response_text = "Perfeito! Sua consulta esta confirmada. Nos vemos la! 😊"
+            ConversationStateService.clear(phone)
+            delivered = await _send_response(phone, response_text)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            return JSONResponse({"status": "appointment_confirmed", "phone": phone})
+
+    # --- Detecção de intenção de cancelamento ---
+    is_explicit_cancel = (
+        state.stage == "awaiting_cancel_confirmation"  # já confirmou acima via is_affirmative
+        or any(token in normalized for token in _EXPLICIT_CANCEL_TOKENS)
+    )
+    is_ambiguous = not is_explicit_cancel and (
+        normalized.strip() in ("nao", "nao.", "nao!", "nao,") or
+        any(token in normalized for token in _AMBIGUOUS_CANCEL_TOKENS)
+    )
+
+    if is_ambiguous:
+        # Pede confirmação explícita antes de cancelar
+        label = state.pending_event_label or "sua consulta"
+        response_text = (
+            f"Voce gostaria de cancelar {label}? "
+            "Responda SIM para confirmar o cancelamento."
+        )
+        state.stage = "awaiting_cancel_confirmation"
+        ConversationStateService.save(phone, state)
         delivered = await _send_response(phone, response_text)
         if message_id:
             _mark_message_processed(message_id, phone)
-            
         ConversationService.add_message(phone, "patient", text)
         ConversationService.add_message(phone, "assistant", response_text)
-        return JSONResponse({"status": "appointment_confirmed", "phone": phone})
-        
-    if any(token in normalized for token in ("nao", "cancelar", "nao vou", "desmarcar")):
-        if event_id:
-            CalendarService().cancel_appointment(event_id)
-            
-        response_text = "Consulta cancelada com sucesso. Se precisar agendar novamente, estou a disposicao!"
-        ConversationStateService.clear(phone)
-        
+        return JSONResponse({"status": "cancel_confirmation_requested", "phone": phone})
+
+    if is_explicit_cancel:
+        appointment_start = state.metadata.get(AppointmentConfirmationService.METADATA_START_KEY)
+        reminder_type = state.metadata.get(
+            AppointmentConfirmationService.METADATA_TYPE_KEY,
+            AppointmentConfirmationService.REMINDER_TYPE_DAY_BEFORE,
+        )
+
+        if not event_id:
+            # Sem event_id: não afirma sucesso, alerta a doutora
+            await _send_scope_alert(
+                patient_phone=phone,
+                patient_name=contact_name or "Desconhecido",
+                summary="Falha no cancelamento: event_id ausente",
+                reason="O paciente solicitou cancelamento mas o event_id nao estava disponivel no estado.",
+                last_message=text,
+            )
+            AppointmentConfirmationService.mark_patient_response(
+                event_id="",
+                appointment_start=appointment_start or "",
+                status="cancel_failed",
+                response_text=text,
+                reminder_type=reminder_type,
+            )
+            response_text = "Vou verificar isso com a Dra. Priscila e retorno o quanto antes."
+            delivered = await _send_response(phone, response_text)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            return JSONResponse({"status": "cancel_failed_no_event_id", "phone": phone})
+
+        result: CancelResult = CalendarService().cancel_appointment(event_id)
+
+        if result.cancelled:
+            response_text = "Consulta cancelada com sucesso. Se precisar agendar novamente, estou a disposicao!"
+            ConversationStateService.clear(phone)
+            delivered = await _send_response(phone, response_text)
+            if message_id:
+                _mark_message_processed(message_id, phone)
+            ConversationService.add_message(phone, "patient", text)
+            ConversationService.add_message(phone, "assistant", response_text)
+            AppointmentConfirmationService.mark_patient_response(
+                event_id=event_id,
+                appointment_start=appointment_start or "",
+                status="cancelled",
+                response_text=text,
+                reminder_type=reminder_type,
+            )
+            return JSONResponse({"status": "appointment_cancelled", "phone": phone})
+
+        # Falha real no cancelamento
+        await _send_scope_alert(
+            patient_phone=phone,
+            patient_name=contact_name or "Desconhecido",
+            summary="Falha ao cancelar consulta no Calendar",
+            reason=result.error or "Erro desconhecido na API do Google Calendar",
+            last_message=text,
+        )
+        AppointmentConfirmationService.mark_patient_response(
+            event_id=event_id,
+            appointment_start=appointment_start or "",
+            status="cancel_failed",
+            response_text=text,
+            reminder_type=reminder_type,
+        )
+        response_text = "Vou verificar isso com a Dra. Priscila e retorno o quanto antes."
         delivered = await _send_response(phone, response_text)
         if message_id:
             _mark_message_processed(message_id, phone)
-            
         ConversationService.add_message(phone, "patient", text)
         ConversationService.add_message(phone, "assistant", response_text)
-        return JSONResponse({"status": "appointment_cancelled", "phone": phone})
+        return JSONResponse({"status": "cancel_failed", "phone": phone})
 
     return None
 

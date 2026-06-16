@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from src.infrastructure.integrations.calendar_service import CancelResult
 
 
 def _build_payload(message_id: str = "msg-1") -> dict:
@@ -604,7 +605,7 @@ class TestMainWebhook:
 
         def fake_cancel_appointment(self, event_id):
             call_count["cancel"] += 1
-            return True
+            return CancelResult(cancelled=True, already_absent=False, error=None)
 
         monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
         monkeypatch.setattr(
@@ -684,7 +685,7 @@ class TestMainWebhook:
 
         def fake_cancel_appointment(self, event_id):
             call_count["cancel"] += 1
-            return event_id == "evt-old"
+            return CancelResult(cancelled=(event_id == "evt-old"), already_absent=False, error=None)
 
         monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
         monkeypatch.setattr(
@@ -762,7 +763,7 @@ class TestMainWebhook:
 
         def fake_cancel_appointment(self, event_id):
             call_count["cancel"] += 1
-            return False
+            return CancelResult(cancelled=False, already_absent=False, error="simulated network error")
 
         def fake_send_alert(self, patient_name, patient_phone, summary, reason, last_message=""):
             call_count["alert"] += 1
@@ -870,7 +871,7 @@ class TestMainWebhook:
 
         def fake_cancel_appointment(self, event_id):
             call_count["cancel"] += 1
-            return True
+            return CancelResult(cancelled=True, already_absent=False, error=None)
 
         monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
         monkeypatch.setattr(
@@ -1216,7 +1217,7 @@ class TestMainWebhook:
 
         def fake_cancel_appointment(self, event_id):
             call_count["cancel"] += 1
-            return event_id == "evt-old"
+            return CancelResult(cancelled=True, already_absent=False, error=None)
 
         monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
         monkeypatch.setattr(
@@ -1269,11 +1270,12 @@ class TestMainWebhook:
                 headers={"apikey": "test-secret"},
             )
 
+        # Com impl 005: awaiting_cancel_confirmation + "sim" → cancela diretamente (não cai no LLM)
         assert response.status_code == 200
-        assert response.json()["status"] == "processed"
-        assert call_count["process"] == 1
+        assert response.json()["status"] == "appointment_cancelled"
+        assert call_count["process"] == 0
         assert call_count["create"] == 0
-        assert call_count["cancel"] == 0
+        assert call_count["cancel"] == 1
 
     def test_proactive_confirmation_reschedule_preserves_original_event_id(self, monkeypatch):
         import src.main as main
@@ -1296,7 +1298,7 @@ class TestMainWebhook:
 
         def fake_cancel_appointment(self, event_id):
             call_count["cancel"] += 1
-            return True
+            return CancelResult(cancelled=True, already_absent=False, error=None)
 
         monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
         monkeypatch.setattr(

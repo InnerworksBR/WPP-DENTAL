@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from ...domain.policies.phone_service import normalize_internal_phone
 from ...infrastructure.config.config_service import ConfigService
-from ...infrastructure.integrations.calendar_service import CalendarService, SAO_PAULO_TZ
+from ...infrastructure.integrations.calendar_service import CalendarService, CancelResult, SAO_PAULO_TZ
 
 logger = logging.getLogger("wpp-dental")
 
@@ -424,21 +424,19 @@ class CancelAppointmentTool:
         if event_id:
             event = next((item for item in events if item.get("id") == event_id), None)
             if event is None:
-                return "Erro: nao encontrei esse ID de consulta para este telefone."
+                # CA-07: event_id informado nao pertence aos eventos deste telefone
+                return (
+                    "Nao encontrei essa consulta para este telefone. "
+                    "Use consultar_agendamento para obter o ID correto e tente novamente."
+                )
         else:
-            patient_name_lower = patient_name.lower().strip()
-            named_events = [
-                item for item in events
-                if patient_name_lower and patient_name_lower in item.get("summary", "").lower()
-            ]
-            if len(named_events) == 1:
-                event = named_events[0]
-            elif len(events) == 1:
+            # CA-01: sem event_id, so cancela se houver exatamente 1 consulta futura
+            if len(events) == 1:
                 event = events[0]
             else:
                 return (
-                    "Erro: existe mais de uma consulta futura para este telefone. "
-                    "Use consultar_agendamento e cancele informando o event_id correto."
+                    "Existe mais de uma consulta futura para este telefone. "
+                    "Use consultar_agendamento para obter o event_id correto e cancele informando-o."
                 )
 
         current_event_id = event.get("id")
@@ -452,14 +450,17 @@ class CancelAppointmentTool:
             date_str = "N/A"
             time_str = "N/A"
 
-        success = service.cancel_appointment(current_event_id)
-        if success:
+        result: CancelResult = service.cancel_appointment(current_event_id)
+        if result.cancelled:
             return (
                 "Prontinho!\n"
                 "Consulta cancelada com sucesso.\n"
                 f"Data: {date_str}\n"
                 f"Horario: {time_str}"
             )
+        if result.error:
+            logger.error("CancelAppointmentTool: falha real ao cancelar event_id=%s: %s", current_event_id, result.error)
+            return "Erro ao cancelar a consulta. Por favor, tente novamente em instantes."
         return "Erro ao cancelar a consulta. Tente novamente."
 
 

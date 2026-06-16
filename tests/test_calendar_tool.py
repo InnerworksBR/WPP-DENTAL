@@ -1,6 +1,7 @@
 """Testes das ferramentas de agenda expostas ao agente."""
 
 from datetime import datetime
+from src.infrastructure.integrations.calendar_service import CancelResult
 
 
 def _event(event_id: str, summary: str, hour: int) -> dict:
@@ -9,6 +10,10 @@ def _event(event_id: str, summary: str, hour: int) -> dict:
         "summary": summary,
         "start": {"dateTime": datetime(2026, 4, 7, hour, 0).isoformat()},
     }
+
+
+def _ok() -> CancelResult:
+    return CancelResult(cancelled=True, already_absent=False, error=None)
 
 
 class TestCancelAppointmentTool:
@@ -55,7 +60,7 @@ class TestCancelAppointmentTool:
 
             def cancel_appointment(self, event_id):
                 calls["cancelled"].append(event_id)
-                return True
+                return _ok()
 
         monkeypatch.setattr(calendar_tool, "CalendarService", FakeCalendarService)
 

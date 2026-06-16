@@ -7,12 +7,14 @@ import logging
 import os
 import threading
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from ...domain.policies.phone_service import (
     build_phone_search_term,
@@ -24,6 +26,15 @@ from ..config.config_service import ConfigService
 SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
 _APPOINTMENT_CREATION_LOCK = threading.Lock()
 logger = logging.getLogger("wpp-dental")
+
+
+@dataclass
+class CancelResult:
+    """Resultado tipado de cancel_appointment: distingue sucesso/idempotente de erro real."""
+
+    cancelled: bool
+    already_absent: bool
+    error: Optional[str]
 
 
 class CalendarService:
@@ -532,12 +543,33 @@ class CalendarService:
                 )
             return self.create_appointment(patient_name, patient_phone, start_sp)
 
-    def cancel_appointment(self, event_id: str) -> bool:
-        """Cancela um evento do Google Calendar."""
+    def cancel_appointment(self, event_id: str) -> CancelResult:
+        """Cancela um evento do Google Calendar.
+
+        Retorna CancelResult:
+        - cancelled=True, already_absent=False -> 2xx (sucesso real)
+        - cancelled=True, already_absent=True  -> 404/410 (ja inexistente, idempotente)
+        - cancelled=False, error=<msg>          -> falha real (rede/auth/5xx)
+        - event_id vazio                        -> cancelled=False sem chamar a API
+        """
+        if not event_id:
+            return CancelResult(cancelled=False, already_absent=False, error="event_id ausente")
         try:
             service = self._get_service()
             service.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()
-            return True
+            return CancelResult(cancelled=True, already_absent=False, error=None)
+        except HttpError as exc:
+            status = getattr(exc, "resp", None)
+            status_code = int(status.status) if status and hasattr(status, "status") else None
+            if status_code in (404, 410):
+                return CancelResult(cancelled=True, already_absent=True, error=None)
+            logger.error(
+                "Falha ao cancelar evento no Google Calendar: event_id=%s: %s",
+                event_id,
+                exc,
+                exc_info=True,
+            )
+            return CancelResult(cancelled=False, already_absent=False, error=str(exc))
         except Exception as exc:
             logger.error(
                 "Falha ao cancelar evento no Google Calendar: event_id=%s: %s",
@@ -545,7 +577,7 @@ class CalendarService:
                 exc,
                 exc_info=True,
             )
-            return False
+            return CancelResult(cancelled=False, already_absent=False, error=str(exc))
 
     def find_appointment_by_patient(self, patient_name: str, patient_phone: str) -> Optional[dict]:
         """Busca a proxima consulta de um paciente pelo nome e telefone."""
