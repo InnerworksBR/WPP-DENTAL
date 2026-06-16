@@ -268,6 +268,8 @@ class TestCreateAppointmentIdempotency:
         svc.config = type("C", (), {
             "get_slot_duration": lambda s: 15,
             "get_max_days_ahead": lambda s: 60,
+            "get_min_business_days_ahead": lambda s: 0,
+            "get_holidays": lambda s: [],
         })()
         svc.calendar_id = "primary"
         return svc

@@ -218,11 +218,11 @@ class TestCleanAgentPureFunctions:
         state = self._state(offered_date="15/06/2026", offered_times=["08:00"])
         assert _is_offered_slot("16/06/2026 08:00", state) is False
 
-    def test_is_offered_true_sem_oferta_previa(self):
-        """Sem offered_date qualquer slot e valido (oferta ainda nao ocorreu)."""
+    def test_is_offered_false_sem_oferta_previa(self):
+        """AG-03: sem offered_date/offered_times o slot deve ser negado (fail-closed)."""
         from src.application.services.clean_agent_service import _is_offered_slot
         state = self._state()
-        assert _is_offered_slot("15/06/2026 08:00", state) is True
+        assert _is_offered_slot("15/06/2026 08:00", state) is False
 
     def test_is_offered_false_para_slot_rejeitado(self):
         from src.application.services.clean_agent_service import _is_offered_slot

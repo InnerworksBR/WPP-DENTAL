@@ -83,16 +83,21 @@ def _is_offered_slot(datetime_str: str, state: Any) -> bool:
             return False
         if getattr(state, "earliest_time", "") and time_str < state.earliest_time:
             return False
-        if getattr(state, "requested_weekday", "") and str(dt.weekday()) != str(state.requested_weekday):
-            return False
+        _req_wd = getattr(state, "requested_weekday", "")
+        if _req_wd != "" and _req_wd is not None:
+            try:
+                if dt.weekday() != int(_req_wd):
+                    return False
+            except (TypeError, ValueError):
+                pass
         if not state.offered_date or not state.offered_times:
-            return True
+            return False
         return (
             date_str == state.offered_date
             and time_str in state.offered_times
         )
     except ValueError:
-        return True
+        return False
 
 
 def _has_valid_direct_plan(patient_phone: str, state: Any, config: ConfigService) -> bool:
@@ -105,6 +110,9 @@ def _has_valid_direct_plan(patient_phone: str, state: Any, config: ConfigService
         plan_name = str(candidate or "").strip()
         if not plan_name:
             continue
+        # AG-04: "Particular" is always a valid direct plan — no config lookup needed
+        if plan_name.lower() == "particular":
+            return True
         plan = config.get_plan_by_name(plan_name) or config.find_plan_fuzzy(plan_name)
         if plan and not plan.get("referral", False):
             return True

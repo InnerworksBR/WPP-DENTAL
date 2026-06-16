@@ -22,6 +22,10 @@ class TestCalendarRules:
             lambda self: 2,
         )
         monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.ConfigService.get_holidays",
+            lambda self: [],
+        )
+        monkeypatch.setattr(
             "src.interfaces.tools.calendar_tool.ConfigService.get_suggestions_count",
             lambda self: 3,
         )
@@ -79,6 +83,11 @@ class TestCalendarRules:
         captured = {}
         tool = GetAvailableSlotsTool()
         monkeypatch.setattr(calendar_tool, "datetime", FixedDatetime)
+        _past = FixedDatetime(2000, 1, 1, tzinfo=SAO_PAULO_TZ)
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool._compute_earliest_allowed_date",
+            lambda config: _past,
+        )
         monkeypatch.setattr(
             "src.interfaces.tools.calendar_tool.ConfigService.get_suggestions_count",
             lambda self: 2,
@@ -99,9 +108,15 @@ class TestCalendarRules:
         assert "quinta-feira, 14/05/2026" in result
 
     def test_get_available_slots_returns_no_options_when_calendar_is_blocked(self, monkeypatch):
+        from datetime import date as date_type
         from src.interfaces.tools.calendar_tool import GetAvailableSlotsTool
 
         tool = GetAvailableSlotsTool()
+        _past = datetime(2000, 1, 1, tzinfo=SAO_PAULO_TZ)
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool._compute_earliest_allowed_date",
+            lambda config: _past,
+        )
         monkeypatch.setattr(
             "src.interfaces.tools.calendar_tool.CalendarService.get_available_slots",
             lambda self, target, period=None: [],
@@ -116,6 +131,11 @@ class TestCalendarRules:
         from src.interfaces.tools.calendar_tool import GetAvailableSlotsTool
 
         tool = GetAvailableSlotsTool()
+        _past = datetime(2000, 1, 1, tzinfo=SAO_PAULO_TZ)
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool._compute_earliest_allowed_date",
+            lambda config: _past,
+        )
         monkeypatch.setattr(
             "src.interfaces.tools.calendar_tool.ConfigService.get_suggestions_count",
             lambda self: 2,
@@ -155,6 +175,10 @@ class TestCalendarRules:
         monkeypatch.setattr(
             "src.interfaces.tools.calendar_tool.ConfigService.get_min_business_days_ahead",
             lambda self: 2,
+        )
+        monkeypatch.setattr(
+            "src.interfaces.tools.calendar_tool.ConfigService.get_holidays",
+            lambda self: [],
         )
         monkeypatch.setattr(
             "src.interfaces.tools.calendar_tool.ConfigService.get_suggestions_count",

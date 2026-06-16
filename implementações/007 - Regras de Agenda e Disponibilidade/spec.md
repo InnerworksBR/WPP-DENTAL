@@ -1,10 +1,10 @@
 # Regras de Agenda e Disponibilidade
 
 > **ID:** 007
-> **Status:** 🟡 Planejada
+> **Status:** 🟢 Concluída
 > **Prioridade:** 🟠 Alta
 > **Criada em:** 2026-06-15
-> **Última atualização:** 2026-06-15
+> **Última atualização:** 2026-06-16
 > **Autor:** Agente AI
 
 ---

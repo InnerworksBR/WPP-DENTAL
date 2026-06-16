@@ -375,6 +375,32 @@ class ConfigService:
         """Retorna a janela minima de dias uteis antes do primeiro horario sugerido."""
         return self.get_settings().get("scheduling", {}).get("min_business_days_ahead", 2)
 
+    def get_holidays(self) -> list[str]:
+        """Retorna feriados configurados como lista de 'DD/MM' ou 'DD/MM/YYYY'."""
+        raw = self.get_settings().get("scheduling", {}).get("holidays", [])
+        result = []
+        for entry in (raw if isinstance(raw, list) else []):
+            s = str(entry).strip()
+            parts = s.split("/")
+            try:
+                if len(parts) == 2:
+                    day, month = int(parts[0]), int(parts[1])
+                    if 1 <= day <= 31 and 1 <= month <= 12:
+                        result.append(f"{day:02d}/{month:02d}")
+                    else:
+                        raise ValueError
+                elif len(parts) == 3:
+                    day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+                    if 1 <= day <= 31 and 1 <= month <= 12:
+                        result.append(f"{day:02d}/{month:02d}/{year}")
+                    else:
+                        raise ValueError
+                else:
+                    raise ValueError
+            except (ValueError, IndexError):
+                logger.warning("Feriado invalido ignorado: %r", s)
+        return result
+
     def get_openai_model(self) -> str:
         """Retorna o modelo OpenAI configurado."""
         return self.get_settings().get("openai", {}).get("model", "gpt-4o-mini")

@@ -40,7 +40,12 @@ class AppointmentOfferService:
 
     _DATE_PATTERN = re.compile(r"\b(\d{2}/\d{2}(?:/\d{4})?)\b")
     _TIME_PATTERN = re.compile(r"\b(\d{1,2}):(\d{2})\b")
-    _HOUR_ONLY_PATTERN = re.compile(r"(?:\bas\b|\ba?s?\b|\b)\s*(\d{1,2})(?:h\b| horas?\b)?")
+    # CA-07: require explicit hour context — "as/a 9", "9h", "9 horas".
+    # Never match bare numbers ("2 pessoas", "dia 3").
+    _HOUR_ONLY_PATTERN = re.compile(
+        r"\bas?\s+(\d{1,2})\b"   # "as 9", "às 9", "a 9"
+        r"|(\d{1,2})\s*h(?:oras?)?\b"  # "9h", "9 horas"
+    )
     _FIRST_OPTION_PATTERN = re.compile(r"\b(primeira|primeiro|1a|1o|opcao 1|opcao numero 1|1)\b")
     _SECOND_OPTION_PATTERN = re.compile(r"\b(segunda|segundo|2a|2o|opcao 2|opcao numero 2|2)\b")
     _CONFIRMATION_MARKERS = (
@@ -133,6 +138,23 @@ class AppointmentOfferService:
         normalized = normalized.encode("ascii", "ignore").decode("ascii").lower()
         return re.sub(r"\s+", " ", normalized).strip()
 
+    @staticmethod
+    def _resolve_year(date_str_dm: str) -> str:
+        """Resolve o ano de uma data 'DD/MM' usando hoje como referencia (CA-08).
+
+        Se 'DD/MM' com o ano atual ja ficou no passado, usa o proximo ano.
+        """
+        now = datetime.now()
+        year = now.year
+        try:
+            day, month = int(date_str_dm[:2]), int(date_str_dm[3:5])
+            candidate = datetime(year, month, day)
+            if candidate.date() < now.date():
+                year += 1
+        except ValueError:
+            pass
+        return f"{date_str_dm}/{year}"
+
     @classmethod
     def _is_confirmation_request_text(cls, text: str) -> bool:
         normalized = cls._normalize(text)
@@ -163,7 +185,7 @@ class AppointmentOfferService:
 
             date_str = date_match.group(1)
             if len(date_str) == 5:
-                date_str = f"{date_str}/{datetime.now().year}"
+                date_str = cls._resolve_year(date_str)
 
             times = []
             for hour, minute in time_matches:
@@ -197,7 +219,7 @@ class AppointmentOfferService:
 
             date_str = date_match.group(1)
             if len(date_str) == 5:
-                date_str = f"{date_str}/{datetime.now().year}"
+                date_str = cls._resolve_year(date_str)
 
             hour, minute = time_matches[0]
             return AppointmentConfirmationRequest(
@@ -223,7 +245,7 @@ class AppointmentOfferService:
             for explicit_date in explicit_dates:
                 candidate = explicit_date
                 if len(candidate) == 5:
-                    candidate = f"{candidate}/{datetime.now().year}"
+                    candidate = cls._resolve_year(candidate)
                 if candidate != normalized_offer_date:
                     return None
 
@@ -244,10 +266,12 @@ class AppointmentOfferService:
             if time_str in explicit_times:
                 return time_str
 
-        for hour_match in cls._HOUR_ONLY_PATTERN.findall(normalized):
-            candidate = f"{int(hour_match):02d}:00"
-            if candidate in offer.times:
-                return candidate
+        for g1, g2 in cls._HOUR_ONLY_PATTERN.findall(normalized):
+            hour_str = g1 or g2
+            if hour_str:
+                candidate = f"{int(hour_str):02d}:00"
+                if candidate in offer.times:
+                    return candidate
 
         if offer.times:
             if cls._FIRST_OPTION_PATTERN.search(normalized):

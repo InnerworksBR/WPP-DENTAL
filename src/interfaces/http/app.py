@@ -221,7 +221,13 @@ async def receive_message(request: Request):
             }
         )
 
-    if ConversationService.reset_context_if_finished(phone):
+    _pre_state = ConversationStateService.get(phone)
+    _has_pending_agenda = bool(
+        getattr(_pre_state, "pending_slot_date", "")
+        or getattr(_pre_state, "pending_slot_time", "")
+        or getattr(_pre_state, "intent", "") == "reschedule"
+    )
+    if ConversationService.reset_context_if_finished(phone, has_pending_agenda=_has_pending_agenda):
         ConversationStateService.clear(phone)
 
     try:

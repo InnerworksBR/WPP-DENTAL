@@ -50,6 +50,21 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def _compute_earliest_allowed_date(config: ConfigService) -> datetime:
+    """Retorna a data mais proxima permitida para agendamento respeitando dias uteis e feriados."""
+    from ...infrastructure.integrations.calendar_service import CalendarService
+    min_bdays = config.get_min_business_days_ahead()
+    holidays = config.get_holidays()
+    now = datetime.now(SAO_PAULO_TZ)
+    earliest = now.date()
+    counted = 0
+    while counted < min_bdays:
+        earliest += timedelta(days=1)
+        if earliest.weekday() < 5 and not CalendarService._is_holiday(earliest, holidays):
+            counted += 1
+    return datetime.combine(earliest, datetime.min.time()).replace(tzinfo=SAO_PAULO_TZ)
+
+
 def _resolve_date_input(date: str) -> datetime:
     """Aceita DD/MM/YYYY ou um dia da semana e devolve a proxima data real."""
     try:
@@ -185,6 +200,15 @@ class GetAvailableSlotsTool:
                 "A clinica nao atende aos finais de semana."
             )
 
+        config = ConfigService()
+        earliest_allowed = _compute_earliest_allowed_date(config)
+        if datetime.combine(dt.date(), datetime.min.time()).replace(tzinfo=SAO_PAULO_TZ) < earliest_allowed:
+            min_bdays = config.get_min_business_days_ahead()
+            return (
+                f"Erro: {_date_label(dt)} esta dentro da janela minima de {min_bdays} dias uteis. "
+                "Use 'buscar_proximo_dia_disponivel' para encontrar o primeiro horario disponivel."
+            )
+
         service = CalendarService()
         try:
             slots = service.get_available_slots(dt, period)
@@ -284,14 +308,15 @@ class FindNextAvailableDayTool:
                 weekday_text = _normalize_text(str(weekday))
                 target_weekday = int(weekday_text) if weekday_text.isdigit() else _WEEKDAY_LOOKUP.get(weekday_text)
 
+            holidays = config.get_holidays()
             business_days_counted = 0
             while business_days_counted < min_business_days:
                 target += timedelta(days=1)
-                if target.weekday() < 5:
+                if target.weekday() < 5 and not CalendarService._is_holiday(target.date(), holidays):
                     business_days_counted += 1
 
             for _ in range(max_days_ahead):
-                while target.weekday() >= 5:
+                while target.weekday() >= 5 or CalendarService._is_holiday(target.date(), holidays):
                     target += timedelta(days=1)
                 if target_weekday is not None and target.weekday() != target_weekday:
                     target += timedelta(days=1)

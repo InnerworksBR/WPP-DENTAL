@@ -183,8 +183,30 @@ class CalendarService:
     def _normalize_datetime(value: datetime) -> datetime:
         """Normaliza datetimes para o timezone de Sao Paulo."""
         if value.tzinfo is None:
-            return value.replace(tzinfo=SAO_PAULO_TZ)
+            # Naive datetime: assume local São Paulo time. fold=0 selects first occurrence
+            # during DST overlap (CA-09).
+            return value.replace(tzinfo=SAO_PAULO_TZ, fold=0)
         return value.astimezone(SAO_PAULO_TZ)
+
+    @staticmethod
+    def _is_holiday(date_obj: Any, holidays: list[str]) -> bool:
+        """Retorna True se a data e um feriado configurado (CA-03)."""
+        for h in holidays:
+            parts = h.split("/")
+            try:
+                if len(parts) == 2:
+                    if date_obj.day == int(parts[0]) and date_obj.month == int(parts[1]):
+                        return True
+                elif len(parts) == 3:
+                    if (
+                        date_obj.day == int(parts[0])
+                        and date_obj.month == int(parts[1])
+                        and date_obj.year == int(parts[2])
+                    ):
+                        return True
+            except (ValueError, IndexError, AttributeError):
+                continue
+        return False
 
     @staticmethod
     def _normalize_phone(phone: str) -> str:
@@ -424,6 +446,8 @@ class CalendarService:
         events = self.get_events(date, period_start, period_end)
         busy_intervals = []
         for event in events:
+            if str(event.get("status", "")).lower() == "cancelled":
+                continue
             start_str = event.get("start", {}).get("dateTime")
             end_str = event.get("end", {}).get("dateTime")
 
@@ -470,6 +494,8 @@ class CalendarService:
         events = self.get_events(start_time, start_time.time(), end_time.time())
 
         for event in events:
+            if str(event.get("status", "")).lower() == "cancelled":
+                continue
             start_str = event.get("start", {}).get("dateTime")
             end_str = event.get("end", {}).get("dateTime")
 
@@ -544,6 +570,20 @@ class CalendarService:
         if start_sp.date() > max_date:
             raise ValueError(
                 f"O agendamento so pode ser feito ate {self.config.get_max_days_ahead()} dias a frente."
+            )
+
+        # WE-05/CA-02: enforce minimum business days window (source of truth)
+        min_bdays = self.config.get_min_business_days_ahead()
+        holidays = self.config.get_holidays()
+        earliest_allowed = now_sp.date()
+        bdays_counted = 0
+        while bdays_counted < min_bdays:
+            earliest_allowed += timedelta(days=1)
+            if earliest_allowed.weekday() < 5 and not self._is_holiday(earliest_allowed, holidays):
+                bdays_counted += 1
+        if start_sp.date() < earliest_allowed:
+            raise ValueError(
+                f"O agendamento so pode ser feito a partir de {min_bdays} dias uteis."
             )
 
         with _APPOINTMENT_CREATION_LOCK:
@@ -685,6 +725,8 @@ class CalendarService:
 
         matched_events = []
         for event in events_result.get("items", []):
+            if str(event.get("status", "")).lower() == "cancelled":
+                continue
             summary_digits = self._normalize_phone(event.get("summary", ""))
             if not search_term:
                 continue
