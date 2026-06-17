@@ -270,10 +270,15 @@ class TestCalendarRules:
             datetime(2026, 4, 7, 0, 0, tzinfo=SAO_PAULO_TZ)
         )
 
-        assert len(appointments) == 1
-        assert appointments[0]["event_id"] == "evt-1"
-        assert appointments[0]["patient_name"] == "Maria Silva"
-        assert appointments[0]["patient_phone"] == "11999999999"
+        # 013-C: o evento com telefone e extraido normalmente; eventos sem telefone
+        # parseavel (que nao sao bloqueios marcados) seguem com telefone vazio para
+        # resolucao por nome a jusante (em vez de descarte silencioso).
+        by_id = {a["event_id"]: a for a in appointments}
+        assert "evt-1" in by_id
+        assert by_id["evt-1"]["patient_name"] == "Maria Silva"
+        assert by_id["evt-1"]["patient_phone"] == "11999999999"
+        assert "evt-2" in by_id
+        assert by_id["evt-2"]["patient_phone"] == ""
 
     def test_create_day_block_uses_all_day_busy_event(self, monkeypatch):
         service = CalendarService()

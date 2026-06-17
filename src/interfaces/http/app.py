@@ -33,7 +33,7 @@ from ...domain.policies.appointment_offer_service import (
 from ...domain.policies.phone_service import normalize_conversation_phone, normalize_internal_phone
 from ...domain.policies.scope_guard_service import ScopeGuardService
 from ...infrastructure.config.config_service import ConfigService
-from ...infrastructure.integrations.calendar_service import CalendarService, CancelResult
+from ...infrastructure.integrations.calendar_service import CalendarService, CancelResult, SAO_PAULO_TZ
 from ...infrastructure.persistence import OutboundMessageStore
 from ...infrastructure.persistence.connection import close_db, get_db, init_db
 
@@ -340,13 +340,31 @@ async def receive_message(request: Request):
             return confirmation_response
 
     recent_history = ConversationService.get_history(phone, limit=8)
-    _capture_schedule_constraints(phone, text, current_state, recent_history)
+    # 013: snapshot do contexto de oferta ANTES de _capture (que limpa o estado em mudancas)
+    had_offer_context = (
+        bool(current_state.offered_times)
+        or AppointmentOfferService.extract_latest_offer(recent_history) is not None
+        or AppointmentOfferService.extract_latest_confirmation_request(recent_history) is not None
+    )
+    constraints_changed = _capture_schedule_constraints(phone, text, current_state, recent_history)
     current_state = ConversationStateService.get(phone)
 
     if current_state.stage not in {
         "awaiting_cancel_confirmation",
         AppointmentConfirmationService.CONFIRMATION_STAGE,
     }:
+        # 013-A/B: paciente recusou a oferta ou pediu horario/dia especifico -> re-ofertar
+        if constraints_changed and had_offer_context:
+            reoffer_response = await _handle_reactive_reoffer(
+                phone=phone,
+                text=text,
+                contact_name=contact_name,
+                message_id=message_id,
+                history=recent_history,
+            )
+            if reoffer_response is not None:
+                return reoffer_response
+
         slot_selection_response = await _handle_offered_slot_selection(
             phone=phone,
             text=text,
@@ -866,6 +884,30 @@ def _resolve_excluded_day_numbers(day_numbers: list[int], requested_weekday: str
     return dates
 
 
+def _resolve_requested_date(day_number: int, explicit_date: str = "") -> str:
+    """013-B: resolve um 'dia N' (ou data DD/MM/YYYY) para a proxima data futura valida."""
+    if explicit_date:
+        return explicit_date
+    if not day_number:
+        return ""
+    config = ConfigService()
+    now = datetime.now()
+    max_date = (now + timedelta(days=config.get_max_days_ahead())).date()
+    cursor = now.replace(day=1)
+    for _ in range(13):
+        try:
+            candidate = cursor.replace(day=day_number).date()
+        except ValueError:
+            candidate = None
+        if candidate and now.date() <= candidate <= max_date:
+            return candidate.strftime("%d/%m/%Y")
+        if cursor.month == 12:
+            cursor = cursor.replace(year=cursor.year + 1, month=1)
+        else:
+            cursor = cursor.replace(month=cursor.month + 1)
+    return ""
+
+
 def _slot_satisfies_state_filters(date_str: str, time_str: str, state) -> bool:
     if f"{date_str} {time_str}" in state.rejected_slots:
         return False
@@ -888,6 +930,18 @@ def _capture_schedule_constraints(phone: str, text: str, state, history: list[di
     constraints = AppointmentOfferService.extract_request_constraints(text)
     if not constraints.changes_pending_confirmation:
         return False
+
+    # 013-B: se a mensagem for uma SELECAO de um horario ja ofertado (ex.: "pode ser as 8"),
+    # nao tratar o horario/dia como mudanca — isso e escolha, nao nova restricao.
+    current_offer = None
+    if state.offered_date and state.offered_times:
+        current_offer = AppointmentOffer(state.offered_date, state.offered_times)
+    else:
+        current_offer = AppointmentOfferService.extract_latest_offer(history)
+    is_selection = (
+        current_offer is not None
+        and AppointmentOfferService.resolve_selection(text, current_offer) is not None
+    )
 
     changed = False
     if constraints.earliest_time and state.earliest_time != constraints.earliest_time:
@@ -913,6 +967,31 @@ def _capture_schedule_constraints(phone: str, text: str, state, history: list[di
         if excluded_date not in state.excluded_dates:
             state.excluded_dates.append(excluded_date)
             changed = True
+
+    offer_date = current_offer.date_str if current_offer else state.offered_date
+
+    # 013-B: horario especifico pedido (ex.: "11:00", "as 18:30") vira earliest_time,
+    # desde que NAO seja uma selecao de horario ja ofertado.
+    if (
+        not is_selection
+        and constraints.requested_time
+        and state.earliest_time != constraints.requested_time
+    ):
+        state.earliest_time = constraints.requested_time
+        changed = True
+
+    # 013-B: dia especifico pedido (ex.: "dia 23", "23/06/2026")
+    requested_date = _resolve_requested_date(
+        constraints.requested_day_number, constraints.requested_date
+    )
+    if (
+        not is_selection
+        and requested_date
+        and requested_date != offer_date
+        and state.requested_date != requested_date
+    ):
+        state.requested_date = requested_date
+        changed = True
 
     pending_confirmation = AppointmentOfferService.extract_latest_confirmation_request(history)
     if constraints.rejects_current_slot and pending_confirmation:
@@ -1098,6 +1177,97 @@ async def _force_safe_escalation_response(
     )
     ConversationStateService.clear(phone)
     return _get_patient_escalation_message()
+
+
+async def _handle_reactive_reoffer(
+    phone: str,
+    text: str,
+    contact_name: str,
+    message_id: str,
+    history: list[dict],
+):
+    """013-A/B: re-oferta determinística quando o paciente recusa a oferta atual ou
+    pede um horário/dia específico não ofertado. Evita o beco sem saída ("não está
+    entre as opções") e o loop de re-oferecer os mesmos 2 horários.
+    """
+    state = ConversationStateService.get(phone)
+
+    # Determina o dia inicial da busca: dia pedido > dia do contexto atual > hoje
+    start_date = None
+    if state.requested_date:
+        try:
+            start_date = datetime.strptime(state.requested_date, "%d/%m/%Y").replace(tzinfo=SAO_PAULO_TZ)
+        except ValueError:
+            start_date = None
+    if start_date is None:
+        ctx = (
+            AppointmentOfferService.extract_latest_offer(history)
+            or AppointmentOfferService.extract_latest_confirmation_request(history)
+        )
+        ctx_date = getattr(ctx, "date_str", "") if ctx else ""
+        if ctx_date:
+            try:
+                start_date = datetime.strptime(ctx_date, "%d/%m/%Y").replace(tzinfo=SAO_PAULO_TZ)
+            except ValueError:
+                start_date = None
+    if start_date is None:
+        start_date = datetime.now(SAO_PAULO_TZ)
+
+    try:
+        result = CalendarService().find_next_available_slots(
+            start_date=start_date,
+            period=state.requested_period or None,
+            earliest_time=state.earliest_time or "",
+            exclude_dates=state.excluded_dates,
+            exclude_slots=state.rejected_slots,
+            limit=ConfigService().get_suggestions_count(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[reoferta] %s | falha na busca: %s", phone, exc, exc_info=True)
+        return None  # deixa o LLM tentar
+
+    if not result:
+        response_text = (
+            "Nao encontrei horario livre com essa preferencia nos proximos dias. 😕\n"
+            "Quer que eu veja outro dia ou periodo?"
+        )
+        delivered = await _send_response(phone, response_text)
+        if not delivered:
+            if message_id:
+                _mark_message_failed(message_id, phone, "Failed to deliver reoffer-none message")
+            raise HTTPException(status_code=502, detail="Failed to deliver reoffer-none message")
+        ConversationService.add_message(phone, "patient", text)
+        ConversationService.add_message(phone, "assistant", response_text)
+        if message_id:
+            _mark_message_processed(message_id, phone)
+        return JSONResponse({"status": "reoffer_none", "phone": phone})
+
+    state.offered_date = result["date_str"]
+    state.offered_times = result["times"]
+    ConversationStateService.save(phone, state)
+
+    options = "\n".join(f"{index}. {t}" for index, t in enumerate(result["times"], 1))
+    response_text = (
+        f"Tenho estes horarios disponiveis em {result['date_str']}:\n{options}\n\n"
+        "Qual voce prefere?"
+    )
+    delivered = await _send_response(phone, response_text)
+    if not delivered:
+        if message_id:
+            _mark_message_failed(message_id, phone, "Failed to deliver reactive reoffer")
+        raise HTTPException(status_code=502, detail="Failed to deliver reactive reoffer")
+    ConversationService.add_message(phone, "patient", text)
+    ConversationService.add_message(phone, "assistant", response_text)
+    if message_id:
+        _mark_message_processed(message_id, phone)
+    return JSONResponse(
+        {
+            "status": "reactive_reoffer",
+            "phone": phone,
+            "offered_date": result["date_str"],
+            "response_preview": response_text[:100],
+        }
+    )
 
 
 async def _handle_offered_slot_selection(

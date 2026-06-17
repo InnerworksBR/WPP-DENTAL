@@ -221,6 +221,31 @@ class AppointmentConfirmationService:
             "Voce consegue comparecer? Se precisar remarcar, me avise por aqui."
         )
 
+    def _resolve_missing_phones(self, appointments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """013-C: resolve telefone por nome no cadastro quando o evento nao traz telefone.
+
+        Evita perda silenciosa de lembretes para consultas criadas manualmente sem
+        telefone no evento. Loga quando nao consegue resolver.
+        """
+        for appointment in appointments:
+            if str(appointment.get("patient_phone", "")).strip():
+                continue
+            name = str(appointment.get("patient_name", "")).strip()
+            match = PatientService.find_by_name(name) if name else None
+            if match and match.get("phone"):
+                appointment["patient_phone"] = match["phone"]
+                logger.info(
+                    "[confirmacao] telefone resolvido por nome para '%s' (event_id=%s)",
+                    name, appointment.get("event_id"),
+                )
+            else:
+                logger.warning(
+                    "[confirmacao] consulta sem telefone e sem cadastro unico — PULADA "
+                    "(nome=%r, event_id=%s)",
+                    name, appointment.get("event_id"),
+                )
+        return appointments
+
     def _select_unique_appointments(self, appointments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # CO-06: deduplicar por (phone, event_id) — mesmo paciente pode ter N consultas
         unique_by_phone_event: dict[tuple, dict[str, Any]] = {}
@@ -268,6 +293,7 @@ class AppointmentConfirmationService:
         appointments = self.calendar.find_patient_appointments_for_date(
             datetime.combine(target_date, time(0, 0), tzinfo=SAO_PAULO_TZ)
         )
+        appointments = self._resolve_missing_phones(appointments)
 
         stats = {
             "candidates": 0,

@@ -33,6 +33,10 @@ class AppointmentRequestConstraints:
     excluded_day_numbers: list[int] = field(default_factory=list)
     excluded_dates: list[str] = field(default_factory=list)
     changes_pending_confirmation: bool = False
+    # 013-B: horario/dia especifico pedido pelo paciente (ex.: "11:00", "dia 23")
+    requested_time: str = ""
+    requested_day_number: int = 0
+    requested_date: str = ""
 
 
 class AppointmentOfferService:
@@ -111,6 +115,25 @@ class AppointmentOfferService:
         "outro horario",
         "outro dia",
         "prefiro outro",
+        # 013-A: recusa ampla — "nenhum"/"outro"/"mais opcoes" devem recusar a oferta atual
+        "nenhum",
+        "nenhuma",
+        "nenhum desses",
+        "nenhum",
+        "nao gostei",
+        "nao gosto",
+        "outro",
+        "outra",
+        "mais opcao",
+        "mais opcoes",
+        "mais horario",
+        "mais horarios",
+        "outro horario",
+        "tem mais",
+        "tem outro",
+        "quero outro",
+        "quero outra",
+        "outras opcoes",
     )
     _PERIODS = {
         "manha": "manha",
@@ -374,6 +397,36 @@ class AppointmentOfferService:
             if day and day not in excluded_day_numbers:
                 excluded_day_numbers.append(day)
 
+        # 013-B: horario especifico pedido (ex.: "11:00", "as 18:30", "18h")
+        requested_time = ""
+        time_match = cls._TIME_PATTERN.search(normalized)
+        if time_match:
+            hour, minute = int(time_match.group(1)), int(time_match.group(2))
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                requested_time = f"{hour:02d}:{minute:02d}"
+        else:
+            for g1, g2 in cls._HOUR_ONLY_PATTERN.findall(normalized):
+                hour_str = g1 or g2
+                if hour_str and 0 <= int(hour_str) <= 23:
+                    requested_time = f"{int(hour_str):02d}:00"
+                    break
+
+        # 013-B: data/dia especifico pedido (que NAO seja exclusao "menos dia X")
+        requested_date = ""
+        requested_day_number = 0
+        date_match = cls._DATE_PATTERN.search(normalized)
+        if date_match:
+            candidate = date_match.group(1)
+            requested_date = cls._resolve_year(candidate) if len(candidate) == 5 else candidate
+        else:
+            day_match = re.search(r"\bdia\s+(\d{1,2})\b", normalized)
+            if day_match and not re.search(
+                r"(?:menos|exceto|nao|n[aã]o)\s+(?:no\s+)?dia\s+\d{1,2}\b", normalized
+            ):
+                day = int(day_match.group(1))
+                if 1 <= day <= 31:
+                    requested_day_number = day
+
         changes_pending_confirmation = any(
             [
                 rejects_current_slot,
@@ -382,6 +435,9 @@ class AppointmentOfferService:
                 requested_weekday,
                 excluded_dates,
                 excluded_day_numbers,
+                requested_time,
+                requested_date,
+                requested_day_number,
             ]
         )
 
@@ -393,6 +449,9 @@ class AppointmentOfferService:
             excluded_day_numbers=excluded_day_numbers,
             excluded_dates=excluded_dates,
             changes_pending_confirmation=changes_pending_confirmation,
+            requested_time=requested_time,
+            requested_day_number=requested_day_number,
+            requested_date=requested_date,
         )
 
     @classmethod

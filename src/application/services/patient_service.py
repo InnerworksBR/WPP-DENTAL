@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Any
 
 from ...domain.policies.phone_service import (
@@ -11,6 +12,13 @@ from ...domain.policies.phone_service import (
     phones_match,
 )
 from ...infrastructure.persistence.connection import get_db
+
+
+def _normalize_name(name: str) -> str:
+    """Normaliza nome para comparacao (sem acento, minusculo, espacos colapsados)."""
+    normalized = unicodedata.normalize("NFKD", name or "")
+    normalized = normalized.encode("ascii", "ignore").decode("ascii").lower()
+    return " ".join(normalized.split())
 
 
 class PatientService:
@@ -48,6 +56,26 @@ class PatientService:
                     "plan": str(row["plan"] or "").strip(),
                 }
         return None
+
+    @staticmethod
+    def find_by_name(name: str) -> dict[str, Any] | None:
+        """013-C: retorna o cadastro cujo nome normalizado bate, somente se houver UM
+        unico match — evita lembrar/cancelar o paciente errado em caso de homonimo."""
+        target = _normalize_name(name)
+        if not target or len(target) < 3:
+            return None
+        db = get_db()
+        rows = db.execute("SELECT id, name, phone, plan FROM patients").fetchall()
+        matches = [row for row in rows if _normalize_name(row["name"]) == target]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        return {
+            "id": int(row["id"]),
+            "name": str(row["name"] or "").strip(),
+            "phone": str(row["phone"] or "").strip(),
+            "plan": str(row["plan"] or "").strip(),
+        }
 
     @staticmethod
     def resolve_name(phone: str, fallback_name: str = "") -> str:

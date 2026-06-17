@@ -41,6 +41,7 @@ metodologia Spec-Driven. A `000` preserva o trabalho de remarcação parcial já
 | 010 | Confirmação Proativa, Cron e Handoff | 🟢 Concluída | 🟡 Média | Heurística de confirmação/handoff robusta; cron com catch-up; janela de handoff | WE-08/CA-11, WE-13, HO-02, CO-04/05/06/07, AG-07/10 | 14 |
 | 011 | Configuração Resiliente e Limpeza de Engine | 🟢 Concluída | 🟠 Alta | YAML/reload/env à prova de falha; remover engine "langgraph" fantasma | CO-02/03/06/07/09/10, EN-02/03/04 | 12 |
 | 012 | Segurança do Webhook e Painel Admin | 🟢 Concluída | 🟠 Alta | Fechar webhook e painel admin; parar vazamento de segredos/PII em logs | WE-03, WE-09, CO-08, AD-01/02/03/04/06 | 14 |
+| 013 | Disponibilidade Reativa e Cobertura do Cron | 🟢 Concluída | 🔴 Crítica | Recusa/horário/dia específico re-ofertam corretamente; cron cobre pacientes de eventos manuais | Reportes Dra. Priscila | 12 |
 
 **Legenda de status:** 🟡 Planejada · 🔵 Em Andamento · 🟢 Concluída · 🔴 Bloqueada · ⚪ Cancelada.
 

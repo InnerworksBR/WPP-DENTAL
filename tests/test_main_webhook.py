@@ -1048,24 +1048,32 @@ class TestMainWebhook:
         assert state.pending_slot_date == "07/04/2026"
         assert state.pending_slot_time == "08:00"
 
-    def test_rejected_pending_slot_is_persisted_before_llm(self, monkeypatch):
+    def test_rejected_pending_slot_is_persisted_and_reoffered(self, monkeypatch):
+        """013-A: recusa persiste o slot recusado e dispara re-oferta deterministica."""
         import src.main as main
         from src.application.services.conversation_state_service import ConversationStateService
         from src.infrastructure.persistence.connection import get_db, init_db
 
-        captured = {}
+        call_count = {"process": 0}
 
         def fake_process_message(**kwargs):
-            captured["state"] = ConversationStateService.get(kwargs["patient_phone"])
-            return "Vou procurar outra opcao para voce."
+            call_count["process"] += 1
+            return "Nao deveria executar"
 
         async def fake_send_message(self, phone, message):
             return True
+
+        def fake_find_next(self, **kwargs):
+            return {"date_str": "27/05/2026", "times": ["09:00", "09:15"]}
 
         monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
         monkeypatch.setattr(
             "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
             fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.find_next_available_slots",
+            fake_find_next,
         )
 
         with TestClient(main.app) as client:
@@ -1095,8 +1103,11 @@ class TestMainWebhook:
             )
 
         assert response.status_code == 200
-        assert response.json()["status"] == "processed"
-        assert "26/05/2026 16:20" in captured["state"].rejected_slots
+        assert response.json()["status"] == "reactive_reoffer"
+        assert call_count["process"] == 0
+        state = ConversationStateService.get("5511999999999")
+        assert "26/05/2026 16:20" in state.rejected_slots
+        assert state.offered_date == "27/05/2026"
 
     def test_new_time_constraint_does_not_confirm_old_morning_slot(self, monkeypatch):
         import src.main as main
@@ -1117,6 +1128,10 @@ class TestMainWebhook:
             call_count["create"] += 1
             return {"id": "evt-wrong"}
 
+        def fake_find_next(self, **kwargs):
+            captured["find_kwargs"] = kwargs
+            return {"date_str": "26/05/2026", "times": ["13:30", "14:00"]}
+
         monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
         monkeypatch.setattr(
             "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
@@ -1125,6 +1140,10 @@ class TestMainWebhook:
         monkeypatch.setattr(
             "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
             fake_create_appointment_if_available,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.find_next_available_slots",
+            fake_find_next,
         )
 
         with TestClient(main.app) as client:
@@ -1155,10 +1174,15 @@ class TestMainWebhook:
 
         assert response.status_code == 200
         assert call_count["create"] == 0
-        assert captured["state"].earliest_time == "13:00"
-        assert captured["state"].requested_period == "tarde"
+        # Restricoes capturadas e usadas na re-oferta deterministica
+        state = ConversationStateService.get("5511999999999")
+        assert state.earliest_time == "13:00"
+        assert state.requested_period == "tarde"
+        assert captured["find_kwargs"]["earliest_time"] == "13:00"
+        assert captured["find_kwargs"]["period"] == "tarde"
 
-    def test_same_time_with_different_day_is_not_treated_as_confirmation(self, monkeypatch):
+    def test_same_time_with_different_day_triggers_reoffer_for_that_day(self, monkeypatch):
+        """013-B: 'Dia 8 as 14:30?' nao confirma o dia antigo — re-oferta para o dia pedido."""
         import src.main as main
         from src.application.services.conversation_state_service import ConversationState, ConversationStateService
         from src.infrastructure.persistence.connection import get_db, init_db
@@ -1176,6 +1200,9 @@ class TestMainWebhook:
             call_count["create"] += 1
             return {"id": "evt-wrong"}
 
+        def fake_find_next(self, **kwargs):
+            return {"date_str": "08/07/2026", "times": ["14:30", "14:45"]}
+
         monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
         monkeypatch.setattr(
             "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
@@ -1184,6 +1211,10 @@ class TestMainWebhook:
         monkeypatch.setattr(
             "src.infrastructure.integrations.calendar_service.CalendarService.create_appointment_if_available",
             fake_create_appointment_if_available,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.find_next_available_slots",
+            fake_find_next,
         )
 
         with TestClient(main.app) as client:
@@ -1209,9 +1240,11 @@ class TestMainWebhook:
             )
 
         assert response.status_code == 200
-        assert response.json()["status"] == "slot_selection_rejected"
+        assert response.json()["status"] == "reactive_reoffer"
         assert call_count["create"] == 0
         assert call_count["process"] == 0
+        state = ConversationStateService.get("5511999999999")
+        assert state.requested_date  # dia 8 resolvido e persistido
 
     def test_first_monday_with_excluded_day_is_persisted_before_llm(self, monkeypatch):
         import importlib

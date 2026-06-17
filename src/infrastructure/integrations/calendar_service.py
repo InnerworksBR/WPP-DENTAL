@@ -489,6 +489,78 @@ class CalendarService:
 
         return available
 
+    def _earliest_allowed_date(self):
+        """Primeira data permitida respeitando dias uteis minimos e feriados (013)."""
+        min_bdays = self.config.get_min_business_days_ahead()
+        holidays = self.config.get_holidays()
+        earliest = datetime.now(SAO_PAULO_TZ).date()
+        counted = 0
+        while counted < min_bdays:
+            earliest += timedelta(days=1)
+            if earliest.weekday() < 5 and not self._is_holiday(earliest, holidays):
+                counted += 1
+        return earliest
+
+    def find_next_available_slots(
+        self,
+        start_date: datetime,
+        period: Optional[str] = None,
+        earliest_time: str = "",
+        exclude_dates: Optional[list[str]] = None,
+        exclude_slots: Optional[list[str]] = None,
+        limit: int = 2,
+        max_days: Optional[int] = None,
+    ) -> Optional[dict[str, Any]]:
+        """013: Busca o proximo dia (a partir de start_date) com horarios disponiveis,
+        respeitando periodo, horario minimo, datas e slots ja recusados.
+
+        Retorna {"date_str": "DD/MM/YYYY", "times": ["HH:MM", ...]} ou None.
+        """
+        excluded_dates = set(exclude_dates or [])
+        excluded_slots = set(exclude_slots or [])
+        holidays = self.config.get_holidays()
+        max_days = max_days or self.config.get_max_days_ahead()
+
+        target = self._normalize_datetime(start_date)
+        earliest_allowed = self._earliest_allowed_date()
+        if target.date() < earliest_allowed:
+            target = datetime.combine(earliest_allowed, time(0, 0)).replace(tzinfo=SAO_PAULO_TZ)
+
+        for _ in range(max_days + 1):
+            day = target.date()
+            day_str = day.strftime("%d/%m/%Y")
+            if (
+                day.weekday() < 5
+                and not self._is_holiday(day, holidays)
+                and day_str not in excluded_dates
+            ):
+                day_start = datetime.combine(day, time(0, 0)).replace(tzinfo=SAO_PAULO_TZ)
+                try:
+                    slots = self.get_available_slots(day_start, period)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("find_next_available_slots: erro em %s: %s", day_str, exc)
+                    slots = []
+
+                times: list[str] = []
+                for slot in slots:
+                    start = slot.get("start")
+                    if not isinstance(start, datetime):
+                        continue
+                    time_str = start.strftime("%H:%M")
+                    if earliest_time and time_str < earliest_time:
+                        continue
+                    if f"{day_str} {time_str}" in excluded_slots:
+                        continue
+                    if time_str not in times:
+                        times.append(time_str)
+
+                if times:
+                    return {"date_str": day_str, "times": times[:limit]}
+
+            target += timedelta(days=1)
+
+        return None
+
     def _slot_conflicts(self, start_time: datetime, end_time: datetime) -> bool:
         """Verifica se existe qualquer conflito de agenda no intervalo informado."""
         events = self.get_events(start_time, start_time.time(), end_time.time())
@@ -687,7 +759,17 @@ class CalendarService:
 
             patient_phone = self._extract_patient_phone_from_event(event)
             if not patient_phone:
-                continue
+                # CO-013: nao descartar silenciosamente. Bloqueios de dia sao ignorados;
+                # eventos de paciente sem telefone parseavel seguem para resolucao por nome
+                # (a jusante, no servico de confirmacao) e ficam logados.
+                if self.event_is_day_block(event):
+                    continue
+                logger.info(
+                    "find_patient_appointments_for_date: evento sem telefone parseavel "
+                    "(event_id=%s, summary=%r) — sera resolvido por nome a jusante",
+                    event.get("id"),
+                    str(event.get("summary", ""))[:40],
+                )
 
             appointments.append(
                 {
