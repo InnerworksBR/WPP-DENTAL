@@ -69,13 +69,17 @@ def test_build_context_detects_awaiting_name():
 
 
 def test_pending_name_resolved():
-    state = _pending_state(FlowState.AWAITING_NAME.value)
+    state = _pending_state(FlowState.AWAITING_NAME.value, plan_name="Amil")
     res = _orch().handle("Maria Silva", state)
     assert res.handled is True
     assert res.status == "pending_slot_name_resolved"
-    assert res.next_state.patient_name == "Maria Silva"
+    # Fiel ao handler antigo: estado volta a IDLE total; o nome é persistido no cadastro (efeito).
     assert res.next_state.stage == FlowState.IDLE.value
-    assert any(e.kind == "upsert_patient" for e in res.effects)
+    assert res.next_state.patient_name == ""
+    assert res.next_state.pending_slot_date == ""
+    upsert = [e for e in res.effects if e.kind == "upsert_patient"]
+    assert upsert and upsert[0].payload["name"] == "Maria Silva"
+    assert upsert[0].payload["plan"] == "Amil"
     assert "Posso confirmar" in res.reply_text
 
 
@@ -90,25 +94,38 @@ def test_pending_name_placeholder_asks_again():
 
 
 def test_pending_plan_resolved():
-    state = _pending_state(FlowState.AWAITING_PLAN.value, patient_name="Joao Souza")
-    res = _orch(plan={"name": "Amil", "referral": False}).handle("amil", state)
+    state = _pending_state(FlowState.AWAITING_PLAN.value)
+    res = _orch(plan={"name": "Amil", "referral": False}).handle(
+        "amil", state, resolved_name="Joao Souza"
+    )
     assert res.handled is True
     assert res.status == "pending_slot_plan_resolved"
     assert res.next_state.plan_name == "Amil"
     assert any(e.kind == "upsert_patient" for e in res.effects)
 
 
+def test_pending_plan_valid_but_no_name_asks_name():
+    state = _pending_state(FlowState.AWAITING_PLAN.value)
+    res = _orch(plan={"name": "Amil", "referral": False}).handle("amil", state, resolved_name="")
+    assert res.handled is True
+    assert res.status == "pending_slot_plan_awaiting_name"
+    assert res.next_state.stage == FlowState.AWAITING_NAME.value
+    assert res.next_state.plan_name == "Amil"
+
+
 def test_pending_plan_referral_escalates():
-    state = _pending_state(FlowState.AWAITING_PLAN.value, patient_name="Joao")
-    res = _orch(plan={"name": "SulAmerica", "referral": True}).handle("sulamerica", state)
+    state = _pending_state(FlowState.AWAITING_PLAN.value)
+    res = _orch(plan={"name": "SulAmerica", "referral": True}).handle(
+        "sulamerica", state, resolved_name="Joao"
+    )
     assert res.handled is True
     assert res.status == "pending_slot_plan_referral"
     assert any(e.kind == "clear_state" for e in res.effects)
 
 
 def test_pending_plan_unknown_asks_again():
-    state = _pending_state(FlowState.AWAITING_PLAN.value, patient_name="Joao")
-    res = _orch(plan=None).handle("plano-inexistente-xyz", state)
+    state = _pending_state(FlowState.AWAITING_PLAN.value)
+    res = _orch(plan=None).handle("plano-inexistente-xyz", state, resolved_name="Joao")
     assert res.handled is True
     assert res.status == "pending_slot_plan_unknown"
 

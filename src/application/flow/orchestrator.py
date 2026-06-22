@@ -65,7 +65,7 @@ class ConversationOrchestrator:
 
     # ── Decisão ────────────────────────────────────────────────────────────────
 
-    def handle(self, message: str, state: ConversationState) -> OrchestratorResult:
+    def handle(self, message: str, state: ConversationState, resolved_name: str = "") -> OrchestratorResult:
         context = self.build_context(state)
         nlu = self._classifier.classify(message, context)
         flow = FlowState.from_stage(state.stage)
@@ -76,7 +76,7 @@ class ConversationOrchestrator:
 
         # Coleta de plano (estado AWAITING_PLAN com horário pendente)
         if flow == FlowState.AWAITING_PLAN and state.pending_slot_date and state.pending_slot_time:
-            return self._resolve_pending_plan(message, state, nlu)
+            return self._resolve_pending_plan(message, state, nlu, resolved_name)
 
         # Fora de escopo: escalar para a doutora
         if nlu.intent == Intent.FORA_ESCOPO:
@@ -89,6 +89,7 @@ class ConversationOrchestrator:
     # ── Transições implementadas ───────────────────────────────────────────────
 
     def _resolve_pending_name(self, message: str, state: ConversationState, nlu: NluResult) -> OrchestratorResult:
+        # nlu.entities.name já descarta placeholder/dígitos/len<3 (mesma regra do handler antigo)
         name = nlu.entities.name
         if not name:
             reply = (
@@ -99,30 +100,30 @@ class ConversationOrchestrator:
                 handled=True, reply_text=reply, next_state=state, status="awaiting_name", nlu=nlu
             )
 
-        next_state = _clone(state)
-        next_state.patient_name = name
-        next_state.stage = FlowState.IDLE.value
+        # Espelha _handle_pending_slot_name: estado volta a IDLE total (pending limpo); o nome é
+        # persistido no cadastro (efeito), não no estado de conversa.
+        plan_name = state.plan_name or None
         reply = _slot_confirmation_request(name, state.pending_slot_date, state.pending_slot_time)
         return OrchestratorResult(
             handled=True,
             reply_text=reply,
-            next_state=next_state,
-            effects=[Effect("upsert_patient", {"name": name, "plan": state.plan_name or None})],
+            next_state=ConversationState(),
+            effects=[Effect("upsert_patient", {"name": name, "plan": plan_name})],
             status="pending_slot_name_resolved",
             nlu=nlu,
         )
 
-    def _resolve_pending_plan(self, message: str, state: ConversationState, nlu: NluResult) -> OrchestratorResult:
+    def _resolve_pending_plan(
+        self, message: str, state: ConversationState, nlu: NluResult, resolved_name: str
+    ) -> OrchestratorResult:
         plan = self._config.extract_plan_from_text(message)
         if plan and plan.get("referral", False):
-            next_state = _clone(state)
-            next_state.stage = FlowState.IDLE.value
             reply = (
                 "Esse convenio e atendido por uma profissional parceira. "
                 "Vou encaminhar para a equipe verificar e te orientar."
             )
             return OrchestratorResult(
-                handled=True, reply_text=reply, next_state=next_state,
+                handled=True, reply_text=reply, next_state=ConversationState(),
                 effects=[Effect("clear_state")], status="pending_slot_plan_referral", nlu=nlu,
             )
 
@@ -136,17 +137,27 @@ class ConversationOrchestrator:
                 handled=True, reply_text=reply, next_state=state, status="pending_slot_plan_unknown", nlu=nlu
             )
 
+        # Plano válido mas nome ainda não confiável: pedir o nome antes de confirmar (espelha o
+        # ramo de _handle_pending_slot_plan que vai para awaiting_name).
+        if not _is_valid_booking_name(resolved_name):
+            next_state = _clone(state)
+            next_state.plan_name = plan_name
+            next_state.stage = FlowState.AWAITING_NAME.value
+            reply = "Perfeito. Agora me informe seu nome completo para eu confirmar a consulta."
+            return OrchestratorResult(
+                handled=True, reply_text=reply, next_state=next_state,
+                status="pending_slot_plan_awaiting_name", nlu=nlu,
+            )
+
         next_state = _clone(state)
         next_state.plan_name = plan_name
         next_state.stage = FlowState.IDLE.value
-        reply = _slot_confirmation_request(
-            state.patient_name, state.pending_slot_date, state.pending_slot_time
-        )
+        reply = _slot_confirmation_request(resolved_name, state.pending_slot_date, state.pending_slot_time)
         return OrchestratorResult(
             handled=True,
             reply_text=reply,
             next_state=next_state,
-            effects=[Effect("upsert_patient", {"name": state.patient_name, "plan": plan_name})],
+            effects=[Effect("upsert_patient", {"name": resolved_name, "plan": plan_name})],
             status="pending_slot_plan_resolved",
             nlu=nlu,
         )
@@ -173,6 +184,18 @@ class ConversationOrchestrator:
             status="escalated",
             nlu=nlu,
         )
+
+
+def _is_valid_booking_name(name: str) -> bool:
+    """Espelha _is_valid_booking_name do app.py: rejeita vazio, 'paciente' e telefone."""
+    clean = (name or "").strip()
+    if not clean:
+        return False
+    if clean.lower() == "paciente":
+        return False
+    if clean.replace("+", "").isdigit():
+        return False
+    return True
 
 
 def _clone(state: ConversationState) -> ConversationState:

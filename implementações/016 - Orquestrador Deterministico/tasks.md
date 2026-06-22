@@ -2,7 +2,7 @@
 
 > **Implementação:** 016 - Orquestrador Determinístico
 > **Spec:** [spec.md](./spec.md)
-> **Progresso:** 3/13 tarefas concluídas (23%)
+> **Progresso:** 4/13 tarefas concluídas (31%)
 > **Última atualização:** 2026-06-22
 
 ---
@@ -42,7 +42,7 @@
   - **Dependências:** T-002
   - **Estimativa:** Média
 
-- [~] **T-004:** Coleta de nome e plano (migrar `_handle_pending_slot_name/_plan`)
+- [x] **T-004:** Coleta de nome e plano (migrar `_handle_pending_slot_name/_plan`)
   - **Descrição:** Estados PRECISA_NOME/PRECISA_PLANO com as validações atuais (nome válido, plano
     direto vs encaminhamento).
   - **Arquivos envolvidos:** `src/application/flow/orchestrator.py`, `src/interfaces/http/app.py`
@@ -129,7 +129,7 @@
 | T-001  | ✅ Concluída | 2026-06-22 | `flow/states.py` (FlowState == stages atuais) |
 | T-002  | ✅ Concluída | 2026-06-22 | `OrchestratorResult` + `Effect` + flag `handled` (deferimento) |
 | T-003  | ✅ Concluída | 2026-06-22 | Esqueleto + `build_context` + roteamento via NLU |
-| T-004  | 🔄 Em andamento | — | Scaffold de nome/plano + escalação; falta paridade total + wiring |
+| T-004  | ✅ Concluída | 2026-06-22 | Nome/plano migrados fielmente e religados no webhook (status legados preservados); handler antigo vira fallback de borda |
 | T-005  | ⬜ Pendente | — | — |
 | T-006  | ⬜ Pendente | — | — |
 | T-007  | ⬜ Pendente | — | — |

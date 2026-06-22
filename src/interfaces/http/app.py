@@ -26,6 +26,7 @@ from ...application.services.conversation_state_service import (
 )
 from ...application.services.handoff_service import HandoffService
 from ...application.services.patient_service import PatientService
+from ...application.flow import ConversationOrchestrator
 from ...domain.policies.appointment_offer_service import (
     AppointmentOffer,
     AppointmentOfferService,
@@ -162,6 +163,14 @@ app.include_router(admin_router)
 
 dental_crew = CleanAgentService()
 gateway = get_gateway()
+orchestrator = ConversationOrchestrator()
+
+# Mapeia os status granulares do orquestrador para os status HTTP legados (contrato preservado).
+_LEGACY_ORCH_STATUS = {
+    "pending_slot_plan_referral": "pending_slot_plan_resolved",
+    "pending_slot_plan_unknown": "pending_slot_plan_resolved",
+    "pending_slot_plan_awaiting_name": "pending_slot_plan_resolved",
+}
 
 
 def _process_message_in_worker(**kwargs) -> str:
@@ -307,25 +316,40 @@ async def receive_message(request: Request):
     if escalation_response is not None:
         return escalation_response
 
-    if current_state.stage == "awaiting_name_for_slot_confirmation":
-        name_response = await _handle_pending_slot_name(
+    if current_state.stage in (
+        "awaiting_name_for_slot_confirmation",
+        "awaiting_plan_for_slot_confirmation",
+    ):
+        # 016: orquestrador determinístico assume a coleta de nome/plano.
+        orch_response = await _run_orchestrator_and_respond(
             phone=phone,
             text=text,
             contact_name=contact_name,
             message_id=message_id,
+            current_state=current_state,
         )
-        if name_response is not None:
-            return name_response
+        if orch_response is not None:
+            return orch_response
 
-    if current_state.stage == "awaiting_plan_for_slot_confirmation":
-        plan_response = await _handle_pending_slot_plan(
-            phone=phone,
-            text=text,
-            contact_name=contact_name,
-            message_id=message_id,
-        )
-        if plan_response is not None:
-            return plan_response
+        # Fallback defensivo (bordas ainda não migradas, ex.: sem horário pendente).
+        if current_state.stage == "awaiting_name_for_slot_confirmation":
+            name_response = await _handle_pending_slot_name(
+                phone=phone,
+                text=text,
+                contact_name=contact_name,
+                message_id=message_id,
+            )
+            if name_response is not None:
+                return name_response
+        else:
+            plan_response = await _handle_pending_slot_plan(
+                phone=phone,
+                text=text,
+                contact_name=contact_name,
+                message_id=message_id,
+            )
+            if plan_response is not None:
+                return plan_response
 
     if current_state.stage in {
         AppointmentConfirmationService.CONFIRMATION_STAGE,
@@ -934,6 +958,70 @@ def _capture_schedule_constraints(phone: str, text: str, state, history: list[di
 async def _send_response(phone: str, response_text: str) -> bool:
     """Envia uma resposta ao paciente como mensagem única."""
     return await gateway.send_text(phone, (response_text or "").strip())
+
+
+async def _apply_orchestrator_effects(phone: str, effects, contact_name: str, text: str) -> bool:
+    """Aplica os efeitos colaterais decididos pelo orquestrador. Retorna True se limpou o estado."""
+    cleared = False
+    for effect in effects:
+        if effect.kind == "upsert_patient":
+            PatientService.upsert(
+                phone, effect.payload.get("name", ""), effect.payload.get("plan")
+            )
+        elif effect.kind == "clear_state":
+            ConversationStateService.clear(phone)
+            cleared = True
+        elif effect.kind == "register_interaction":
+            PatientService.save_interaction(
+                phone,
+                effect.payload.get("type", "schedule"),
+                effect.payload.get("summary", ""),
+            )
+        elif effect.kind == "alert_doctor":
+            await _send_scope_alert(
+                patient_phone=phone,
+                patient_name=effect.payload.get("patient_name") or contact_name or "Desconhecido",
+                summary=effect.payload.get("summary", ""),
+                reason=effect.payload.get("reason", ""),
+                last_message=effect.payload.get("last_message", text),
+            )
+    return cleared
+
+
+async def _run_orchestrator_and_respond(
+    *,
+    phone: str,
+    text: str,
+    contact_name: str,
+    message_id: str,
+    current_state: ConversationState,
+):
+    """Religamento incremental: deixa o orquestrador decidir. Retorna None quando ele defere
+    (`handled=False`), para o webhook recair no motor atual sem mudança de comportamento."""
+    resolved_name = _build_patient_name(phone, contact_name)
+    result = orchestrator.handle(text, current_state, resolved_name=resolved_name)
+    if not result.handled:
+        return None
+
+    cleared = await _apply_orchestrator_effects(phone, result.effects, contact_name, text)
+    if result.next_state is not None and not cleared:
+        ConversationStateService.save(phone, result.next_state)
+
+    delivered = await _send_response(phone, result.reply_text)
+    if not delivered:
+        if message_id:
+            _mark_message_failed(message_id, phone, "Failed to deliver orchestrator response")
+        raise HTTPException(status_code=502, detail="Failed to deliver orchestrator response")
+
+    ConversationService.add_message(phone, "patient", text)
+    ConversationService.add_message(phone, "assistant", result.reply_text)
+    if message_id:
+        _mark_message_processed(message_id, phone)
+
+    status = _LEGACY_ORCH_STATUS.get(result.status, result.status)
+    return JSONResponse(
+        {"status": status, "phone": phone, "response_preview": result.reply_text[:100]}
+    )
 
 
 async def _handle_pending_slot_plan(
