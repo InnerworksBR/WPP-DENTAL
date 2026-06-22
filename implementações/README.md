@@ -3,7 +3,7 @@
 > **Índice do projeto (Spec-Driven Development).** Este arquivo é a fonte de verdade do
 > status e da ordem das implementações. Atualize-o sempre que uma implementação mudar de status.
 >
-> **Criado em:** 2026-06-15 · **Última atualização:** 2026-06-16 (impl 010 concluída)
+> **Criado em:** 2026-06-15 · **Última atualização:** 2026-06-22 (Fase 2 — refatoração 014–017 planejada)
 
 ---
 
@@ -44,6 +44,31 @@ metodologia Spec-Driven. A `000` preserva o trabalho de remarcação parcial já
 | 013 | Disponibilidade Reativa e Cobertura do Cron | 🟢 Concluída | 🔴 Crítica | Recusa/horário/dia específico re-ofertam corretamente; cron cobre pacientes de eventos manuais | Reportes Dra. Priscila | 12 |
 
 **Legenda de status:** 🟡 Planejada · 🔵 Em Andamento · 🟢 Concluída · 🔴 Bloqueada · ⚪ Cancelada.
+
+---
+
+## 2-B. Fase 2 — Refatoração do Núcleo de Conversa (014–017)
+
+Concluído o **Programa de Recuperação** (000–013, suíte 488/488 verde), a Fase 2 ataca a
+**causa estrutural** dos fluxos quebrados, não mais bugs pontuais: o sistema tem **dois cérebros
+disputando a conversa** — o loop de tool-calls do `CleanAgentService` e uma máquina de estados
+implícita de ~2.256 linhas no `app.py` (dezenas de `_handle_*`). Os dois dessincronizam, e a
+verdade da oferta é reconstruída por **regex na prosa do LLM** (`_parse_offered_slots`).
+
+A meta é inverter o comando: **o agendamento vira uma transação determinística** (máquina de
+estados única e dona da verdade) e o **LLM fica contido** em dois papéis estreitos — entender a
+intenção (NLU) e dar o tom. Transporte (Evolution) é isolado atrás de uma interface para deixar de
+acoplar o orquestrador. Decisões: **manter Evolution** + **refactor cirúrgico** (não rewrite),
+usando os 488 testes como catraca anti-regressão. Trabalho na branch `refactor/nucleo-conversa`.
+
+| # | Implementação | Status | Prioridade | Escopo (resumo) | ~Tarefas |
+|---|---|---|---|---|---|
+| 014 | Gateway de Transporte | 🟡 Planejada | 🟠 Alta | Isola a Evolution atrás de `MessagingGateway` + `EvolutionAdapter`; transporte trocável; tira plumbing do `app.py` | 9 |
+| 015 | NLU Estruturada | 🟡 Planejada | 🟠 Alta | `IntentClassifier` único: mensagem → `{intent, entities}` validado; consolida heurísticas dispersas | 8 |
+| 016 | Orquestrador Determinístico | 🟡 Planejada | 🔴 Crítica | FSM explícita dona das decisões de agenda; absorve os `_handle_*`; fim do regex-na-prosa | 13 |
+| 017 | Aposentar o Cérebro Duplo | 🟡 Planejada | 🟠 Alta | Remove o loop decisor do LLM e os guard-rails; `app.py` vira controlador fino; 1 fonte de verdade | 8 |
+
+**Sequência obrigatória:** 014 → 015 → 016 → 017 (cadeia; cada uma depende da anterior).
 
 ---
 
@@ -101,6 +126,10 @@ escopo, mensageria, configuração e segurança.
 | 010 | 002, 003, 004, 005 |
 | 011 | 001, 002 |
 | 012 | 001, 002 |
+| 014 | baseline 000–013 verde |
+| 015 | 014 |
+| 016 | 014, 015 |
+| 017 | 016 |
 
 ---
 
