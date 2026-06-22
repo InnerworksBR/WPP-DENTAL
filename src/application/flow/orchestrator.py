@@ -9,13 +9,22 @@ o orquestrador passa a retornar `handled=True` e o caminho antigo correspondente
 from __future__ import annotations
 
 import dataclasses
+import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from .states import FlowState
 from ..nlu import IntentClassifier, Intent, NluContext, NluResult
+from ..services.appointment_confirmation_service import AppointmentConfirmationService
 from ..services.conversation_state_service import ConversationState
+from ...domain.policies.appointment_offer_service import AppointmentOfferService
 from ...infrastructure.config.config_service import ConfigService
+from ...infrastructure.integrations.calendar_service import CalendarService
+
+logger = logging.getLogger(__name__)
+
+_ORGANIC_CANCEL_TOKENS = ("cancelar", "desmarcar", "cancela", "cancele")
 
 
 @dataclass
@@ -45,9 +54,18 @@ def _deferred(nlu: NluResult | None = None) -> OrchestratorResult:
 class ConversationOrchestrator:
     """Decide a ação determinística para a mensagem do paciente."""
 
-    def __init__(self, classifier: IntentClassifier | None = None, config: ConfigService | None = None) -> None:
+    def __init__(
+        self,
+        classifier: IntentClassifier | None = None,
+        config: ConfigService | None = None,
+        calendar: CalendarService | None = None,
+    ) -> None:
         self._config = config or ConfigService()
         self._classifier = classifier or IntentClassifier(config=self._config)
+        self._calendar = calendar
+
+    def _calendar_service(self) -> CalendarService:
+        return self._calendar or CalendarService()
 
     # ── Contexto ───────────────────────────────────────────────────────────────
 
@@ -82,9 +100,68 @@ class ConversationOrchestrator:
         if nlu.intent == Intent.FORA_ESCOPO:
             return self._escalate(message, state, nlu)
 
-        # Demais intenções (oferta/escolha/confirmação/cancelamento/remarcação) ainda
+        # Demais intenções (oferta/escolha/confirmação/remarcação) ainda
         # são tratadas pelo motor atual — serão migradas nas próximas tarefas.
         return _deferred(nlu)
+
+    def try_cancellation(self, message: str, state: ConversationState, phone: str) -> OrchestratorResult:
+        """Cancelamento orgânico determinístico (impl 005). Espelha _handle_cancellation_intent.
+
+        Detecta intenção de cancelar consulta única, fixa o evento no estado e pede confirmação.
+        Defere (`handled=False`) quando há múltiplas consultas, erro de calendário, ou a mensagem
+        não é cancelamento — deixando o motor atual seguir.
+        """
+        if FlowState.from_stage(state.stage) != FlowState.IDLE or state.intent == "reschedule":
+            return _deferred()
+
+        normalized = AppointmentOfferService._normalize(message)
+        if not any(tok in normalized for tok in _ORGANIC_CANCEL_TOKENS):
+            return _deferred()
+        if "remarc" in normalized or "reagend" in normalized or AppointmentOfferService.has_change_request(message):
+            return _deferred()  # não sequestrar remarcação
+
+        try:
+            events = self._calendar_service().find_appointments_by_phone(phone)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[orchestrator] cancelamento: falha ao consultar agenda: %s", exc, exc_info=True)
+            return _deferred()
+
+        if not events:
+            return OrchestratorResult(
+                handled=True,
+                reply_text="Nao encontrei nenhuma consulta futura no seu nome para cancelar.",
+                next_state=state,
+                status="cancel_no_appointment",
+            )
+        if len(events) > 1:
+            return _deferred()  # múltiplas: deixa o motor atual desambiguar
+
+        evt = events[0]
+        evt_id = str(evt.get("id", "") or "")
+        start_str = str(evt.get("start", {}).get("dateTime", "") or "")
+        if not evt_id or not start_str:
+            return _deferred()
+
+        try:
+            label = datetime.fromisoformat(start_str).strftime("%d/%m/%Y as %H:%M")
+        except ValueError:
+            label = "sua consulta"
+
+        next_state = _clone(state)
+        next_state.pending_event_id = evt_id
+        next_state.pending_event_label = label
+        next_state.metadata[AppointmentConfirmationService.METADATA_EVENT_ID_KEY] = evt_id
+        next_state.metadata[AppointmentConfirmationService.METADATA_START_KEY] = start_str
+        next_state.stage = FlowState.AWAITING_CANCEL_CONFIRMATION.value
+        return OrchestratorResult(
+            handled=True,
+            reply_text=(
+                f"Encontrei sua consulta de {label}.\n\n"
+                "Voce confirma o cancelamento? Responda SIM para confirmar."
+            ),
+            next_state=next_state,
+            status="cancel_confirmation_requested",
+        )
 
     # ── Transições implementadas ───────────────────────────────────────────────
 

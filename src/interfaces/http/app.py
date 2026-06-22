@@ -400,6 +400,19 @@ async def receive_message(request: Request):
             return slot_selection_response
 
         # Cancelamento organico deterministico: evita o loop do LLM (event_id nao persiste)
+        # 016: orquestrador assume a deteccao; handler antigo vira fallback de borda.
+        cancel_result = orchestrator.try_cancellation(
+            text, ConversationStateService.get(phone), phone
+        )
+        if cancel_result.handled:
+            return await _respond_orchestrator(
+                cancel_result,
+                phone=phone,
+                text=text,
+                contact_name=contact_name,
+                message_id=message_id,
+            )
+
         cancellation_response = await _handle_cancellation_intent(
             phone=phone,
             text=text,
@@ -988,21 +1001,16 @@ async def _apply_orchestrator_effects(phone: str, effects, contact_name: str, te
     return cleared
 
 
-async def _run_orchestrator_and_respond(
+async def _respond_orchestrator(
+    result,
     *,
     phone: str,
     text: str,
     contact_name: str,
     message_id: str,
-    current_state: ConversationState,
 ):
-    """Religamento incremental: deixa o orquestrador decidir. Retorna None quando ele defere
-    (`handled=False`), para o webhook recair no motor atual sem mudança de comportamento."""
-    resolved_name = _build_patient_name(phone, contact_name)
-    result = orchestrator.handle(text, current_state, resolved_name=resolved_name)
-    if not result.handled:
-        return None
-
+    """Aplica efeitos, persiste o estado, envia a resposta e registra o histórico de um resultado
+    já decidido pelo orquestrador. Preserva os status HTTP legados."""
     cleared = await _apply_orchestrator_effects(phone, result.effects, contact_name, text)
     if result.next_state is not None and not cleared:
         ConversationStateService.save(phone, result.next_state)
@@ -1021,6 +1029,25 @@ async def _run_orchestrator_and_respond(
     status = _LEGACY_ORCH_STATUS.get(result.status, result.status)
     return JSONResponse(
         {"status": status, "phone": phone, "response_preview": result.reply_text[:100]}
+    )
+
+
+async def _run_orchestrator_and_respond(
+    *,
+    phone: str,
+    text: str,
+    contact_name: str,
+    message_id: str,
+    current_state: ConversationState,
+):
+    """Religamento incremental: deixa o orquestrador decidir. Retorna None quando ele defere
+    (`handled=False`), para o webhook recair no motor atual sem mudança de comportamento."""
+    resolved_name = _build_patient_name(phone, contact_name)
+    result = orchestrator.handle(text, current_state, resolved_name=resolved_name)
+    if not result.handled:
+        return None
+    return await _respond_orchestrator(
+        result, phone=phone, text=text, contact_name=contact_name, message_id=message_id
     )
 
 

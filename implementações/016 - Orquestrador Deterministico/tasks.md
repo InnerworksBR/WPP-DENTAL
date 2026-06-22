@@ -2,7 +2,7 @@
 
 > **Implementação:** 016 - Orquestrador Determinístico
 > **Spec:** [spec.md](./spec.md)
-> **Progresso:** 4/13 tarefas concluídas (31%)
+> **Progresso:** 5/13 tarefas concluídas (38%)
 > **Última atualização:** 2026-06-22
 
 ---
@@ -71,7 +71,7 @@
   - **Dependências:** T-005, T-006
   - **Estimativa:** Média
 
-- [ ] **T-008:** Cancelamento seguro (migrar `_handle_cancellation_intent` / impl 005)
+- [x] **T-008:** Cancelamento seguro (migrar `_handle_cancellation_intent` / impl 005)
   - **Descrição:** CANCELAR_CONFIRMACAO com confirmação real antes de cancelar.
   - **Arquivos envolvidos:** `src/application/flow/orchestrator.py`
   - **Critério de conclusão:** Testes de cancelamento seguro verdes.
@@ -133,7 +133,7 @@
 | T-005  | ⬜ Pendente | — | — |
 | T-006  | ⬜ Pendente | — | — |
 | T-007  | ⬜ Pendente | — | — |
-| T-008  | ⬜ Pendente | — | — |
+| T-008  | ✅ Concluída | 2026-06-22 | `try_cancellation` migrado e religado; execução do "SIM" segue no handler de confirmação (a migrar com T-006) |
 | T-009  | ⬜ Pendente | — | — |
 | T-010  | ⬜ Pendente | — | — |
 | T-011  | ⬜ Pendente | — | — |

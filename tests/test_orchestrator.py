@@ -34,10 +34,22 @@ class _FakeLLM:
         return type("R", (), {"intent": self._intent})()
 
 
-def _orch(plan=None, llm_intent="outro"):
+class _FakeCalendar:
+    def __init__(self, events):
+        self._events = events
+
+    def find_appointments_by_phone(self, phone):
+        return self._events
+
+
+def _orch(plan=None, llm_intent="outro", calendar=None):
     config = _FakeConfig(plan=plan)
     classifier = IntentClassifier(structured_llm=_FakeLLM(llm_intent), config=config)
-    return ConversationOrchestrator(classifier=classifier, config=config)
+    return ConversationOrchestrator(classifier=classifier, config=config, calendar=calendar)
+
+
+def _evt(evt_id, dt):
+    return {"id": evt_id, "start": {"dateTime": dt}}
 
 
 def _pending_state(stage, **kw):
@@ -152,3 +164,47 @@ def test_scheduling_intent_is_deferred_for_now():
     assert res.handled is False
     assert res.status == "deferred"
     assert res.nlu is not None
+
+
+# ── Cancelamento orgânico (try_cancellation) ────────────────────────────────────
+
+
+def test_cancellation_single_appointment():
+    cal = _FakeCalendar([_evt("evt-1", "2026-05-19T09:15:00-03:00")])
+    res = _orch(calendar=cal).try_cancellation("quero cancelar", ConversationState(), "5511999999999")
+    assert res.handled is True
+    assert res.status == "cancel_confirmation_requested"
+    assert res.next_state.stage == FlowState.AWAITING_CANCEL_CONFIRMATION.value
+    assert res.next_state.pending_event_id == "evt-1"
+    assert "19/05/2026 as 09:15" in res.reply_text
+
+
+def test_cancellation_no_appointment():
+    res = _orch(calendar=_FakeCalendar([])).try_cancellation("cancelar", ConversationState(), "p")
+    assert res.handled is True
+    assert res.status == "cancel_no_appointment"
+
+
+def test_cancellation_multiple_defers():
+    cal = _FakeCalendar([_evt("a", "2026-05-19T09:15:00-03:00"), _evt("b", "2026-05-20T09:15:00-03:00")])
+    res = _orch(calendar=cal).try_cancellation("cancelar", ConversationState(), "p")
+    assert res.handled is False
+
+
+def test_cancellation_non_cancel_defers():
+    res = _orch(calendar=_FakeCalendar([])).try_cancellation("quero agendar", ConversationState(), "p")
+    assert res.handled is False
+
+
+def test_cancellation_reschedule_not_hijacked():
+    cal = _FakeCalendar([_evt("a", "2026-05-19T09:15:00-03:00")])
+    res = _orch(calendar=cal).try_cancellation("quero remarcar minha consulta", ConversationState(), "p")
+    assert res.handled is False
+
+
+def test_cancellation_only_in_idle():
+    cal = _FakeCalendar([_evt("a", "2026-05-19T09:15:00-03:00")])
+    res = _orch(calendar=cal).try_cancellation(
+        "cancelar", ConversationState(stage="awaiting_cancel_confirmation"), "p"
+    )
+    assert res.handled is False
