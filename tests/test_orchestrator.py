@@ -10,11 +10,18 @@ from src.application.services.conversation_state_service import ConversationStat
 
 
 class _FakeConfig:
-    def __init__(self, plan=None):
+    def __init__(self, plan=None, direct_plan=None):
         self._plan = plan
+        self._direct_plan = direct_plan  # plano válido p/ get_plan_by_name/find_plan_fuzzy
 
     def extract_plan_from_text(self, text):
         return self._plan
+
+    def get_plan_by_name(self, name):
+        return self._direct_plan
+
+    def find_plan_fuzzy(self, query):
+        return self._direct_plan
 
     def get_message(self, key, **kw):
         return "Vou encaminhar para a doutora e ela entrara em contato."
@@ -42,10 +49,17 @@ class _FakeCalendar:
         return self._events
 
 
-def _orch(plan=None, llm_intent="outro", calendar=None):
-    config = _FakeConfig(plan=plan)
+def _orch(plan=None, llm_intent="outro", calendar=None, direct_plan=None):
+    config = _FakeConfig(plan=plan, direct_plan=direct_plan)
     classifier = IntentClassifier(structured_llm=_FakeLLM(llm_intent), config=config)
     return ConversationOrchestrator(classifier=classifier, config=config, calendar=calendar)
+
+
+_CONFIRM_HISTORY = [{"role": "assistant", "content": "Maria, separei este horario. Posso confirmar sua consulta?"}]
+
+
+def _offer_state(**kw):
+    return ConversationState(offered_date="23/06/2026", offered_times=["09:00", "10:00"], **kw)
 
 
 def _evt(evt_id, dt):
@@ -207,4 +221,52 @@ def test_cancellation_only_in_idle():
     res = _orch(calendar=cal).try_cancellation(
         "cancelar", ConversationState(stage="awaiting_cancel_confirmation"), "p"
     )
+    assert res.handled is False
+
+
+# ── Seleção de horário ofertado (try_slot_selection) ────────────────────────────
+
+
+def test_slot_selection_confirmation_requested_with_valid_plan(monkeypatch):
+    monkeypatch.setattr(
+        "src.application.flow.orchestrator.PatientService.find_by_phone", lambda phone: None
+    )
+    orch = _orch(direct_plan={"name": "Amil", "referral": False})
+    res = orch.try_slot_selection("1", _offer_state(plan_name="Amil"), "5511999999999", "Maria Silva", [])
+    assert res.handled is True
+    assert res.status == "slot_confirmation_requested"
+    assert res.next_state.pending_slot_time == "09:00"
+    assert res.next_state.stage == "idle"
+    assert res.extra.get("selected_time") == "09:00"
+
+
+def test_slot_selection_plan_required_without_plan(monkeypatch):
+    monkeypatch.setattr(
+        "src.application.flow.orchestrator.PatientService.find_by_phone", lambda phone: None
+    )
+    res = _orch().try_slot_selection("2", _offer_state(), "5511999999999", "Maria Silva", [])
+    assert res.handled is True
+    assert res.status == "slot_plan_required"
+    assert res.next_state.stage == "awaiting_plan_for_slot_confirmation"
+    assert res.next_state.pending_slot_time == "10:00"
+
+
+def test_slot_selection_affirmative_confirmation_defers_to_proven_handler():
+    res = _orch().try_slot_selection("sim", _offer_state(), "p", "Maria Silva", _CONFIRM_HISTORY)
+    assert res.handled is False
+
+
+def test_slot_selection_no_offer_defers():
+    res = _orch().try_slot_selection("1", ConversationState(), "p", "Maria Silva", [])
+    assert res.handled is False
+
+
+def test_slot_selection_not_among_options_is_rejected():
+    res = _orch().try_slot_selection("11:00", _offer_state(), "p", "Maria Silva", [])
+    assert res.handled is True
+    assert res.status == "slot_selection_rejected"
+
+
+def test_slot_selection_name_uncertain_defers():
+    res = _orch().try_slot_selection("1", _offer_state(), "5511999999999", "5511999999999", [])
     assert res.handled is False

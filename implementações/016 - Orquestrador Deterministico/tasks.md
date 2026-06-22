@@ -2,7 +2,7 @@
 
 > **Implementação:** 016 - Orquestrador Determinístico
 > **Spec:** [spec.md](./spec.md)
-> **Progresso:** 5/13 tarefas concluídas (38%)
+> **Progresso:** 6/13 tarefas concluídas (46%)
 > **Última atualização:** 2026-06-22
 
 ---
@@ -57,7 +57,10 @@
   - **Dependências:** T-003
   - **Estimativa:** Média
 
-- [ ] **T-006:** Escolha e confirmação (migrar `_handle_offered_slot_selection`)
+- [x] **T-006:** Escolha e confirmação (migrar `_handle_offered_slot_selection`)
+  - **NOTA DE ESCOPO:** migrada a SELEÇÃO (`try_slot_selection`, não altera o calendário). A
+    confirmação→criação/remarcação atômica fica no handler provado por decisão de risco do dono
+    (ver spec §9). Habilita o 017 sem arriscar marcar/remarcar.
   - **Descrição:** AGUARDANDO_ESCOLHA/CONFIRMACAO + criação via `CalendarService` (idempotente).
   - **Arquivos envolvidos:** `src/application/flow/orchestrator.py`
   - **Critério de conclusão:** Fluxo feliz completo verde (CA-001).
@@ -78,10 +81,9 @@
   - **Dependências:** T-003
   - **Estimativa:** Média
 
-- [ ] **T-009:** Remarcação atômica + parcial (migrar lógica das impls 000/006)
-  - **Descrição:** REMARCAR_IDENTIFICAR_ANTIGA + troca atômica + alerta de remarcação parcial.
-  - **Arquivos envolvidos:** `src/application/flow/orchestrator.py`
-  - **Critério de conclusão:** Testes de remarcação atômica/parcial verdes (CA-002).
+- [-] **T-009:** Remarcação atômica + parcial (migrar lógica das impls 000/006)
+  - **CANCELADA por decisão de escopo (spec §9):** a remarcação atômica é mantida no handler
+    provado (`_handle_offered_slot_selection`) — maior risco, já verde. Não migrar para a FSM.
   - **Dependências:** T-006
   - **Estimativa:** Grande
 

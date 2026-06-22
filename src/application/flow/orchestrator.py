@@ -18,7 +18,8 @@ from .states import FlowState
 from ..nlu import IntentClassifier, Intent, NluContext, NluResult
 from ..services.appointment_confirmation_service import AppointmentConfirmationService
 from ..services.conversation_state_service import ConversationState
-from ...domain.policies.appointment_offer_service import AppointmentOfferService
+from ..services.patient_service import PatientService
+from ...domain.policies.appointment_offer_service import AppointmentOffer, AppointmentOfferService
 from ...infrastructure.config.config_service import ConfigService
 from ...infrastructure.integrations.calendar_service import CalendarService
 
@@ -45,6 +46,7 @@ class OrchestratorResult:
     effects: list[Effect] = field(default_factory=list)
     status: str = "deferred"
     nlu: NluResult | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 def _deferred(nlu: NluResult | None = None) -> OrchestratorResult:
@@ -103,6 +105,98 @@ class ConversationOrchestrator:
         # Demais intenções (oferta/escolha/confirmação/remarcação) ainda
         # são tratadas pelo motor atual — serão migradas nas próximas tarefas.
         return _deferred(nlu)
+
+    def try_slot_selection(
+        self,
+        message: str,
+        state: ConversationState,
+        phone: str,
+        resolved_name: str,
+        history: list[dict],
+    ) -> OrchestratorResult:
+        """Seleção de horário ofertado (parte SEGURA do _handle_offered_slot_selection: só consulta
+        estado/histórico, não altera o calendário). Fixa o horário escolhido e pede plano/confirmação.
+
+        Defere (`handled=False`) a CONFIRMAÇÃO afirmativa (criação/remarcação atômica) — essa fica no
+        handler provado — e os casos sem oferta / nome incerto / não-seleção.
+        """
+        # Guarda de nome (espelha o topo do handler antigo): nome não confiável => defere.
+        if not _is_valid_booking_name(resolved_name):
+            return _deferred()
+
+        # Confirmação afirmativa de um horário pendente => Branch A (criação/remarcação): handler provado.
+        pending_confirmation = AppointmentOfferService.extract_latest_confirmation_request(history)
+        if pending_confirmation and AppointmentOfferService.is_affirmative_confirmation(message):
+            return _deferred()
+
+        next_state = _clone(state)
+        if next_state.offered_date and next_state.offered_times:
+            offer = AppointmentOffer(next_state.offered_date, list(next_state.offered_times))
+        else:
+            offer = AppointmentOfferService.extract_latest_offer(history)
+            if offer:
+                next_state.offered_date = offer.date_str
+                next_state.offered_times = list(offer.times)
+        if offer is None:
+            return _deferred()
+
+        selected_time = AppointmentOfferService.resolve_selection(message, offer)
+        if selected_time is None:
+            if next_state.offered_date and next_state.offered_times and _looks_like_slot_choice(message):
+                return OrchestratorResult(
+                    handled=True,
+                    reply_text=_build_current_offer_message(next_state),
+                    next_state=next_state,
+                    status="slot_selection_rejected",
+                )
+            return _deferred()
+
+        if not _slot_satisfies_state_filters(offer.date_str, selected_time, next_state):
+            return OrchestratorResult(
+                handled=True,
+                reply_text=_build_stale_confirmation_message(),
+                next_state=next_state,
+                status="slot_selection_filtered",
+            )
+
+        next_state.pending_slot_date = offer.date_str
+        next_state.pending_slot_time = selected_time
+        if not self._resolve_valid_plan_name(next_state, phone):
+            next_state.stage = FlowState.AWAITING_PLAN.value
+            return OrchestratorResult(
+                handled=True,
+                reply_text=_build_plan_request_message(),
+                next_state=next_state,
+                status="slot_plan_required",
+                extra={"selected_time": selected_time},
+            )
+        next_state.stage = FlowState.IDLE.value
+        return OrchestratorResult(
+            handled=True,
+            reply_text=_slot_confirmation_request(resolved_name, offer.date_str, selected_time),
+            next_state=next_state,
+            status="slot_confirmation_requested",
+            extra={"selected_time": selected_time},
+        )
+
+    def _resolve_valid_plan_name(self, state: ConversationState, phone: str) -> str:
+        """Espelha _resolve_valid_plan_name do app.py: valida plano do estado/cadastro contra o
+        config e fixa o nome canônico no estado. Retorna "" se não houver plano direto válido."""
+        candidates = [state.plan_name]
+        patient = PatientService.find_by_phone(phone)
+        if patient:
+            candidates.append(patient.get("plan", ""))
+        for candidate in candidates:
+            plan_name = str(candidate or "").strip()
+            if not plan_name:
+                continue
+            plan = self._config.get_plan_by_name(plan_name) or self._config.find_plan_fuzzy(plan_name)
+            if plan and not plan.get("referral", False):
+                canonical = str(plan.get("name", plan_name)).strip()
+                if state.plan_name != canonical:
+                    state.plan_name = canonical
+                return canonical
+        return ""
 
     def try_cancellation(self, message: str, state: ConversationState, phone: str) -> OrchestratorResult:
         """Cancelamento orgânico determinístico (impl 005). Espelha _handle_cancellation_intent.
@@ -273,6 +367,63 @@ def _is_valid_booking_name(name: str) -> bool:
     if clean.replace("+", "").isdigit():
         return False
     return True
+
+
+# Helpers replicados do app.py (parte SEGURA da seleção). O 017 consolida a duplicação.
+
+def _slot_satisfies_state_filters(date_str: str, time_str: str, state: ConversationState) -> bool:
+    if f"{date_str} {time_str}" in state.rejected_slots:
+        return False
+    if date_str in state.excluded_dates:
+        return False
+    if state.earliest_time and time_str < state.earliest_time:
+        return False
+    if state.requested_weekday:
+        try:
+            dt = datetime.strptime(date_str, "%d/%m/%Y")
+        except ValueError:
+            return True
+        if str(dt.weekday()) != str(state.requested_weekday):
+            return False
+    return True
+
+
+def _looks_like_slot_choice(text: str) -> bool:
+    normalized = AppointmentOfferService._normalize(text)
+    if not normalized:
+        return False
+    if AppointmentOfferService._TIME_PATTERN.search(normalized):
+        return True
+    if AppointmentOfferService._FIRST_OPTION_PATTERN.search(normalized):
+        return True
+    if AppointmentOfferService._SECOND_OPTION_PATTERN.search(normalized):
+        return True
+    return False
+
+
+def _build_plan_request_message() -> str:
+    return (
+        "Antes de confirmar, qual e o seu convenio/plano odontologico?\n"
+        "Se for particular, pode responder \"particular\"."
+    )
+
+
+def _build_current_offer_message(state: ConversationState) -> str:
+    options = "\n".join(
+        f"{index}. {time_str}" for index, time_str in enumerate(state.offered_times, 1)
+    )
+    return (
+        "Esse horario nao esta entre as opcoes que eu te passei.\n"
+        f"As opcoes para {state.offered_date} sao:\n{options}\n\n"
+        "Qual voce prefere?"
+    )
+
+
+def _build_stale_confirmation_message() -> str:
+    return (
+        "Esse horario anterior nao segue mais o que voce pediu.\n"
+        "Vou buscar uma nova opcao respeitando sua preferencia."
+    )
 
 
 def _clone(state: ConversationState) -> ConversationState:

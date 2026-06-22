@@ -390,6 +390,24 @@ async def receive_message(request: Request):
             if reoffer_response is not None:
                 return reoffer_response
 
+        # 016: orquestrador assume a SELEÇÃO de horário (parte segura, sem alterar o calendário).
+        # A confirmação afirmativa (criação/remarcação atômica) é deferida ao handler provado.
+        selection_result = orchestrator.try_slot_selection(
+            text,
+            ConversationStateService.get(phone),
+            phone,
+            _build_patient_name(phone, contact_name),
+            ConversationService.get_history(phone, limit=6),
+        )
+        if selection_result.handled:
+            return await _respond_orchestrator(
+                selection_result,
+                phone=phone,
+                text=text,
+                contact_name=contact_name,
+                message_id=message_id,
+            )
+
         slot_selection_response = await _handle_offered_slot_selection(
             phone=phone,
             text=text,
@@ -1027,9 +1045,9 @@ async def _respond_orchestrator(
         _mark_message_processed(message_id, phone)
 
     status = _LEGACY_ORCH_STATUS.get(result.status, result.status)
-    return JSONResponse(
-        {"status": status, "phone": phone, "response_preview": result.reply_text[:100]}
-    )
+    body = {"status": status, "phone": phone, "response_preview": result.reply_text[:100]}
+    body.update(result.extra)
+    return JSONResponse(body)
 
 
 async def _run_orchestrator_and_respond(

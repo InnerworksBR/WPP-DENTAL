@@ -171,6 +171,14 @@ CA-001..CA-005; suíte total verde.
 - Nenhuma nova.
 
 ## 9. Observações e Decisões de Design
+
+> **Decisão de escopo (2026-06-22, dono do produto):** a parte de **criação/remarcação atômica**
+> do `_handle_offered_slot_selection` (impls 000/005/006) é mantida no handler provado e NÃO é
+> migrada para a FSM — é a transição de maior risco e já está verde. O orquestrador assume apenas
+> a parte SEGURA (que não altera o calendário): geração de oferta e **seleção de horário**
+> (`try_slot_selection`), deferindo a confirmação afirmativa ao handler provado. Isso entrega a
+> fonte única de decisão para o caminho comum e habilita o 017 sem arriscar marcar/remarcar.
+
 - A FSM é a **fronteira anti-regressão**: o LLM nunca mais decide agenda, só descreve (NLU) e
   conversa (tom). É isso que impede o "cérebro duplo" de ressurgir.
 - Manter `ConversationState` (em vez de um novo modelo) reduz risco de migração de dados e mantém os
