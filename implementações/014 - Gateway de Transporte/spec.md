@@ -1,7 +1,7 @@
 # Gateway de Transporte
 
 > **ID:** 014
-> **Status:** 🟡 Planejada
+> **Status:** 🔵 Em Andamento
 > **Prioridade:** 🟠 Alta
 > **Criada em:** 2026-06-22
 > **Última atualização:** 2026-06-22

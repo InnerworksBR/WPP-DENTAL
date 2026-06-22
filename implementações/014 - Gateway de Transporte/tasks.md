@@ -2,7 +2,7 @@
 
 > **Implementação:** 014 - Gateway de Transporte
 > **Spec:** [spec.md](./spec.md)
-> **Progresso:** 0/9 tarefas concluídas (0%)
+> **Progresso:** 5/9 tarefas concluídas (56%)
 > **Última atualização:** 2026-06-22
 
 ---
@@ -20,7 +20,7 @@
 
 ### Fase 1: Preparação e Setup
 
-- [ ] **T-001:** Confirmar baseline verde
+- [x] **T-001:** Confirmar baseline verde
   - **Descrição:** Rodar a suíte completa e registrar o número de testes como linha de base.
   - **Arquivos envolvidos:** —
   - **Critério de conclusão:** `pytest -q` = 488/488 verde, registrado.
@@ -28,7 +28,7 @@
   - **Estimativa:** Pequena
   - **Observações:** Baseline já confirmado: 488 passed em 19.87s (2026-06-22).
 
-- [ ] **T-002:** Criar o pacote `transport` e o contrato
+- [x] **T-002:** Criar o pacote `transport` e o contrato
   - **Descrição:** Criar `transport/__init__.py` e `transport/gateway.py` com a dataclass
     `InboundMessage(frozen)` e a ABC `MessagingGateway` (`parse_inbound`, `send_text`,
     `send_text_sync`), mais a fábrica `get_gateway()` lendo `TRANSPORT_PROVIDER`.
@@ -40,7 +40,7 @@
 
 ### Fase 2: Implementação Core
 
-- [ ] **T-003:** Implementar `EvolutionAdapter.parse_inbound`
+- [x] **T-003:** Implementar `EvolutionAdapter.parse_inbound`
   - **Descrição:** Mover (sem reescrever a lógica) `_extract_message_data`, `_resolve_message_phone`,
     `_build_message_data`, `_is_lid_jid`, `_is_whatsapp_jid`, `_get_nested_string` do `app.py` para
     o adapter, retornando `InboundMessage | None`. Normalizar `from_me` para `bool`.
@@ -50,7 +50,7 @@
   - **Dependências:** T-002
   - **Estimativa:** Média
 
-- [ ] **T-004:** Implementar `EvolutionAdapter.send_text[_sync]`
+- [x] **T-004:** Implementar `EvolutionAdapter.send_text[_sync]`
   - **Descrição:** Delegar ao `WhatsAppService.send_message[_sync]`, preservando `kind` e o registro
     de eco em `OutboundMessageStore`.
   - **Arquivos envolvidos:** `src/infrastructure/integrations/transport/evolution_adapter.py`
@@ -75,7 +75,7 @@
 
 ### Fase 3: Testes e Validação
 
-- [ ] **T-007:** Testes unitários do adapter
+- [x] **T-007:** Testes unitários do adapter
   - **Descrição:** Criar `test_transport_gateway.py` cobrindo os formatos de payload, `@lid`,
     `extendedTextMessage`, `fromMe`, payload sem texto (→ `None`), e `get_gateway` por env.
   - **Arquivos envolvidos:** `tests/test_transport_gateway.py`
@@ -108,14 +108,14 @@
 
 | Tarefa | Status | Data de Conclusão | Observações |
 |--------|--------|-------------------|-------------|
-| T-001  | ⬜ Pendente | — | Baseline 488/488 já confirmado |
-| T-002  | ⬜ Pendente | — | — |
-| T-003  | ⬜ Pendente | — | — |
-| T-004  | ⬜ Pendente | — | — |
-| T-005  | ⬜ Pendente | — | — |
+| T-001  | ✅ Concluída | 2026-06-22 | Baseline 488/488 confirmado |
+| T-002  | ✅ Concluída | 2026-06-22 | `transport/gateway.py` + `__init__` + `get_gateway` |
+| T-003  | ✅ Concluída | 2026-06-22 | `parse_inbound` no adapter; remoção do `app.py` é a T-005 |
+| T-004  | ✅ Concluída | 2026-06-22 | `send_text[_sync]` delega ao `WhatsAppService` |
+| T-005  | ⬜ Pendente | — | Religar `app.py` ao gateway + remover helpers |
 | T-006  | ⬜ Pendente | — | — |
-| T-007  | ⬜ Pendente | — | — |
-| T-008  | ⬜ Pendente | — | — |
+| T-007  | ✅ Concluída | 2026-06-22 | `test_transport_gateway.py` (12 testes verdes) |
+| T-008  | ⬜ Pendente | — | Suíte aditiva já em 500/500; falta após o rewiring |
 | T-009  | ⬜ Pendente | — | — |
 
 ---
