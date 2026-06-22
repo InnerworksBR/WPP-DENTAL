@@ -1,7 +1,7 @@
 # Gateway de Transporte
 
 > **ID:** 014
-> **Status:** 🔵 Em Andamento
+> **Status:** 🟢 Concluída
 > **Prioridade:** 🟠 Alta
 > **Criada em:** 2026-06-22
 > **Última atualização:** 2026-06-22
@@ -132,13 +132,13 @@ N/A — não muda contrato HTTP externo; o endpoint `/webhook/message` permanece
 - Não alterar o esquema do webhook nem a autenticação (`WEBHOOK_AUTH_DISABLED` permanece).
 
 ## 5. Critérios de Aceitação
-- [ ] **CA-001:** `gateway.parse_inbound` cobre todos os formatos hoje tratados por
+- [x] **CA-001:** `gateway.parse_inbound` cobre todos os formatos hoje tratados por
   `_extract_message_data` (data dict único, lista de `messages`, parent+message merge, `@lid`).
-- [ ] **CA-002:** `app.py` usa o gateway para parsing e envio; helpers de parsing da Evolution
+- [x] **CA-002:** `app.py` usa o gateway para parsing e envio; helpers de parsing da Evolution
   não existem mais no `app.py`.
-- [ ] **CA-003:** `TRANSPORT_PROVIDER=evolution` (e ausente) usa o `EvolutionAdapter`.
-- [ ] **CA-004:** `pytest -q` retorna 488/488 (ou mais, com os novos testes do adapter).
-- [ ] **CA-005:** Novos testes do adapter cobrem parsing de `@lid`, texto simples, `extendedText`,
+- [x] **CA-003:** `TRANSPORT_PROVIDER=evolution` (e ausente) usa o `EvolutionAdapter`.
+- [x] **CA-004:** `pytest -q` retorna 500/500 (488 originais + 12 novos do adapter).
+- [x] **CA-005:** Novos testes do adapter cobrem parsing de `@lid`, texto simples, `extendedText`,
   `fromMe`, e payload sem texto (→ `None`).
 
 ## 6. Plano de Testes

@@ -159,7 +159,7 @@ def test_send_text_sync_delegates_to_whatsapp_service(monkeypatch):
             calls["args"] = (phone, message, kind)
             return True
 
-    monkeypatch.setattr(evolution_adapter, "WhatsAppService", _FakeWhatsApp)
+    monkeypatch.setattr(evolution_adapter._whatsapp_service, "WhatsAppService", _FakeWhatsApp)
     adapter = EvolutionAdapter()
     ok = adapter.send_text_sync("5511999998888", "oi", kind="bot")
     assert ok is True
@@ -174,7 +174,7 @@ def test_send_text_async_delegates_to_whatsapp_service(monkeypatch):
             calls["args"] = (phone, message, kind)
             return True
 
-    monkeypatch.setattr(evolution_adapter, "WhatsAppService", _FakeWhatsApp)
+    monkeypatch.setattr(evolution_adapter._whatsapp_service, "WhatsAppService", _FakeWhatsApp)
     adapter = EvolutionAdapter()
     ok = asyncio.run(adapter.send_text("5511999998888", "ola", kind="doctor_alert"))
     assert ok is True

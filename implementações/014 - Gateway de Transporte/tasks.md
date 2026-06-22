@@ -2,7 +2,7 @@
 
 > **Implementação:** 014 - Gateway de Transporte
 > **Spec:** [spec.md](./spec.md)
-> **Progresso:** 5/9 tarefas concluídas (56%)
+> **Progresso:** 9/9 tarefas concluídas (100%)
 > **Última atualização:** 2026-06-22
 
 ---
@@ -58,7 +58,7 @@
   - **Dependências:** T-002
   - **Estimativa:** Pequena
 
-- [ ] **T-005:** Religar o `app.py` ao gateway (parsing)
+- [x] **T-005:** Religar o `app.py` ao gateway (parsing)
   - **Descrição:** Substituir `_extract_message_data(data)` por `gateway.parse_inbound(payload)` no
     webhook; adaptar o uso dos campos (`InboundMessage` em vez de dict). Remover os helpers migrados.
   - **Arquivos envolvidos:** `src/interfaces/http/app.py`
@@ -66,7 +66,7 @@
   - **Dependências:** T-003
   - **Estimativa:** Média
 
-- [ ] **T-006:** Religar o envio ao gateway
+- [x] **T-006:** Religar o envio ao gateway
   - **Descrição:** `_send_response` e demais pontos de envio direto passam pelo `gateway.send_text`.
   - **Arquivos envolvidos:** `src/interfaces/http/app.py`
   - **Critério de conclusão:** Nenhum ponto do `app.py` instancia `WhatsAppService` diretamente para envio.
@@ -83,7 +83,7 @@
   - **Dependências:** T-003, T-004
   - **Estimativa:** Média
 
-- [ ] **T-008:** Rodar a suíte completa (preservação de comportamento)
+- [x] **T-008:** Rodar a suíte completa (preservação de comportamento)
   - **Descrição:** Garantir 488/488 (+ novos) verdes; em especial `test_main_webhook` e
     `test_messaging_*` sem alteração de expectativas.
   - **Arquivos envolvidos:** —
@@ -93,7 +93,7 @@
 
 ### Fase 4: Documentação e Finalização
 
-- [ ] **T-009:** Atualizar status e índice
+- [x] **T-009:** Atualizar status e índice
   - **Descrição:** Marcar critérios de aceitação, mudar status para 🟢 no `spec.md`, atualizar
     `implementações/README.md` e adicionar `.env.example` (`TRANSPORT_PROVIDER=evolution`).
   - **Arquivos envolvidos:** `implementações/014 - Gateway de Transporte/spec.md`,
@@ -112,11 +112,11 @@
 | T-002  | ✅ Concluída | 2026-06-22 | `transport/gateway.py` + `__init__` + `get_gateway` |
 | T-003  | ✅ Concluída | 2026-06-22 | `parse_inbound` no adapter; remoção do `app.py` é a T-005 |
 | T-004  | ✅ Concluída | 2026-06-22 | `send_text[_sync]` delega ao `WhatsAppService` |
-| T-005  | ⬜ Pendente | — | Religar `app.py` ao gateway + remover helpers |
-| T-006  | ⬜ Pendente | — | — |
+| T-005  | ✅ Concluída | 2026-06-22 | `app.py` usa `gateway.parse_inbound`; 6 helpers removidos |
+| T-006  | ✅ Concluída | 2026-06-22 | `_send_response` usa `gateway.send_text` |
 | T-007  | ✅ Concluída | 2026-06-22 | `test_transport_gateway.py` (12 testes verdes) |
-| T-008  | ⬜ Pendente | — | Suíte aditiva já em 500/500; falta após o rewiring |
-| T-009  | ⬜ Pendente | — | — |
+| T-008  | ✅ Concluída | 2026-06-22 | Suíte 500/500 verde após o rewiring (webhook preservado) |
+| T-009  | ✅ Concluída | 2026-06-22 | `.env.example`, spec 🟢 e README atualizados |
 
 ---
 

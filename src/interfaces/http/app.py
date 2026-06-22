@@ -30,10 +30,11 @@ from ...domain.policies.appointment_offer_service import (
     AppointmentOffer,
     AppointmentOfferService,
 )
-from ...domain.policies.phone_service import normalize_conversation_phone, normalize_internal_phone
+from ...domain.policies.phone_service import normalize_internal_phone
 from ...domain.policies.scope_guard_service import ScopeGuardService
 from ...infrastructure.config.config_service import ConfigService
 from ...infrastructure.integrations.calendar_service import CalendarService, CancelResult, SAO_PAULO_TZ
+from ...infrastructure.integrations.transport import get_gateway
 from ...infrastructure.persistence import OutboundMessageStore
 from ...infrastructure.persistence.connection import close_db, get_db, init_db
 
@@ -160,6 +161,7 @@ app = FastAPI(
 app.include_router(admin_router)
 
 dental_crew = CleanAgentService()
+gateway = get_gateway()
 
 
 def _process_message_in_worker(**kwargs) -> str:
@@ -212,17 +214,16 @@ async def receive_message(request: Request):
         logger.debug("Evento ignorado: %s", event)
         return JSONResponse({"status": "ignored", "event": event})
 
-    data = payload.get("data", {})
-    message_data = _extract_message_data(data)
-    if message_data is None:
+    inbound = gateway.parse_inbound(payload)
+    if inbound is None:
         logger.debug("Mensagem ignorada (nao e texto recebido)")
         return JSONResponse({"status": "ignored", "reason": "not_text_or_sent"})
 
-    phone = message_data["phone"]
-    text = message_data["text"]
-    contact_name = message_data.get("contact_name", "")
-    message_id = message_data.get("message_id", "")
-    from_me = message_data.get("from_me", "") == "1"
+    phone = inbound.phone
+    text = inbound.text
+    contact_name = inbound.contact_name
+    message_id = inbound.message_id
+    from_me = inbound.from_me
 
     if message_id:
         claimed, state = _try_claim_message_processing(message_id, phone)
@@ -438,98 +439,6 @@ async def receive_message(request: Request):
             "response_preview": response_text[:100],
         }
     )
-
-
-def _extract_message_data(data: dict[str, Any] | list[Any]) -> dict[str, str] | None:
-    """Extrai os dados da mensagem do payload da Evolution API."""
-    if isinstance(data, dict) and "key" in data and "message" in data:
-        return _build_message_data(data)
-
-    parent_data = {}
-    if isinstance(data, dict):
-        parent_data = {key: value for key, value in data.items() if key != "messages"}
-
-    messages = data if isinstance(data, list) else data.get("messages", [])
-    if isinstance(messages, list):
-        for message in messages:
-            if isinstance(message, dict):
-                extracted = _build_message_data({**parent_data, **message})
-                if extracted is not None:
-                    return extracted
-
-    return None
-
-
-def _is_lid_jid(value: str) -> bool:
-    return str(value or "").strip().lower().endswith("@lid")
-
-
-def _is_whatsapp_jid(value: str) -> bool:
-    normalized = str(value or "").strip().lower()
-    return normalized.endswith("@s.whatsapp.net") or normalized.endswith("@c.us")
-
-
-def _get_nested_string(source: dict[str, Any], path: tuple[str, ...]) -> str:
-    current: Any = source
-    for key in path:
-        if not isinstance(current, dict):
-            return ""
-        current = current.get(key)
-    return current.strip() if isinstance(current, str) else ""
-
-
-def _resolve_message_phone(message_wrapper: dict[str, Any]) -> str:
-    """Resolve o telefone real, evitando usar LID como destinatario quando possivel."""
-    key = message_wrapper.get("key", {})
-    remote_jid = key.get("remoteJid", "") if isinstance(key, dict) else ""
-
-    candidate_paths = (
-        ("key", "remoteJid"),
-        ("key", "participant"),
-        ("key", "participantJid"),
-        ("participant",),
-        ("participantJid",),
-        ("sender",),
-        ("senderJid",),
-        ("from",),
-        ("remoteJid",),
-        ("contact", "id"),
-        ("contact", "jid"),
-        ("contact", "remoteJid"),
-    )
-    for path in candidate_paths:
-        candidate = _get_nested_string(message_wrapper, path)
-        if _is_whatsapp_jid(candidate):
-            return normalize_conversation_phone(candidate)
-
-    if _is_lid_jid(remote_jid):
-        local_part = remote_jid.split("@", 1)[0].strip()
-        return f"{local_part}@lid" if local_part else ""
-
-    return normalize_conversation_phone(remote_jid)
-
-
-def _build_message_data(message_wrapper: dict[str, Any]) -> dict[str, str] | None:
-    """Constroi o dict padrao com dados da mensagem."""
-    key = message_wrapper.get("key", {})
-    phone = _resolve_message_phone(message_wrapper)
-
-    message = message_wrapper.get("message", {})
-    text = (
-        message.get("conversation")
-        or message.get("extendedTextMessage", {}).get("text")
-        or ""
-    )
-    if not text:
-        return None
-
-    return {
-        "phone": phone,
-        "text": text,
-        "contact_name": message_wrapper.get("pushName", ""),
-        "message_id": key.get("id", ""),
-        "from_me": "1" if key.get("fromMe", False) else "0",
-    }
 
 
 def _handle_outbound_message(
@@ -1024,10 +933,7 @@ def _capture_schedule_constraints(phone: str, text: str, state, history: list[di
 
 async def _send_response(phone: str, response_text: str) -> bool:
     """Envia uma resposta ao paciente como mensagem única."""
-    from ...infrastructure.integrations.whatsapp_service import WhatsAppService
-
-    whatsapp = WhatsAppService()
-    return await whatsapp.send_message(phone, (response_text or "").strip())
+    return await gateway.send_text(phone, (response_text or "").strip())
 
 
 async def _handle_pending_slot_plan(

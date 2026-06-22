@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from .gateway import InboundMessage, MessagingGateway
-from ..whatsapp_service import WhatsAppService
+from .. import whatsapp_service as _whatsapp_service
 from ....domain.policies.phone_service import normalize_conversation_phone
 
 
@@ -112,9 +112,20 @@ class EvolutionAdapter(MessagingGateway):
         )
 
     # ── Envio (delega ao WhatsAppService existente) ────────────────────────────
+    #
+    # A classe é resolvida via módulo em tempo de chamada (não por nome importado) para que
+    # os patches de teste em `whatsapp_service.WhatsAppService` continuem valendo. `kind` só é
+    # repassado quando difere do padrão, preservando exatamente a chamada original de envio
+    # ao paciente (`send_message(phone, message)`).
 
     async def send_text(self, phone: str, message: str, kind: str = "bot") -> bool:
-        return await WhatsAppService().send_message(phone, message, kind=kind)
+        service = _whatsapp_service.WhatsAppService()
+        if kind == "bot":
+            return await service.send_message(phone, message)
+        return await service.send_message(phone, message, kind=kind)
 
     def send_text_sync(self, phone: str, message: str, kind: str = "bot") -> bool:
-        return WhatsAppService().send_message_sync(phone, message, kind=kind)
+        service = _whatsapp_service.WhatsAppService()
+        if kind == "bot":
+            return service.send_message_sync(phone, message)
+        return service.send_message_sync(phone, message, kind=kind)
