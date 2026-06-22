@@ -2,7 +2,8 @@
 
 > **Implementação:** 016 - Orquestrador Determinístico
 > **Spec:** [spec.md](./spec.md)
-> **Progresso:** 7/13 tarefas concluídas (54%)
+> **Progresso:** escopo seguro CONCLUÍDO (7 transições migradas; 4 tarefas reavaliadas/canceladas — ver spec §9/§10)
+> **Status:** 🟢 Concluída (escopo seguro)
 > **Última atualização:** 2026-06-22
 
 ---
@@ -50,7 +51,9 @@
   - **Dependências:** T-003
   - **Estimativa:** Média
 
-- [ ] **T-005:** Oferta de horários estruturada (substituir `_parse_offered_slots`)
+- [-] **T-005:** Oferta de horários estruturada (substituir `_parse_offered_slots`)
+  - **REVERTIDA (spec §9):** a oferta inicial via orquestrador rouba conversa que o LLM (guardado)
+    trata melhor, por ganho ~nulo de confiabilidade. Re-oferta reativa (T-007) foi migrada.
   - **Descrição:** OFERTANDO consome slots estruturados do `CalendarService` e grava no estado.
   - **Arquivos envolvidos:** `src/application/flow/orchestrator.py`
   - **Critério de conclusão:** Oferta sem regex em prosa; CA-004.
@@ -87,7 +90,10 @@
   - **Dependências:** T-006
   - **Estimativa:** Grande
 
-- [ ] **T-010:** Religar o webhook ao orquestrador
+- [x] **T-010:** Religar o webhook ao orquestrador
+  - **CONCLUÍDA (parcial por escopo):** webhook religado para as transições migradas (nome/plano,
+    cancelamento, seleção, re-oferta) via `_run_orchestrator_and_respond`/`_respond_orchestrator`.
+    Handlers provados (criação/remarcação) permanecem via deferimento — não há rewire "total".
   - **Descrição:** `receive_message` delega ao `orchestrator.handle`; remover os `_handle_*` migrados;
     aplicar `effects` (interação, alerta, handoff).
   - **Arquivos envolvidos:** `src/interfaces/http/app.py`
@@ -97,14 +103,18 @@
 
 ### Fase 3: Testes e Validação
 
-- [ ] **T-011:** Testes de transição da FSM
+- [x] **T-011:** Testes de transição da FSM
+  - **CONCLUÍDA:** `tests/test_orchestrator.py` cobre todas as transições migradas (nome/plano,
+    cancelamento, seleção, re-oferta) com config/LLM/calendário fakes. ~28 testes.
   - **Descrição:** `test_orchestrator.py` cobrindo todas as transições e casos de borda da spec §6.4.
   - **Arquivos envolvidos:** `tests/test_orchestrator.py`
   - **Critério de conclusão:** Cobertura de transições completa, verde.
   - **Dependências:** T-010
   - **Estimativa:** Grande
 
-- [ ] **T-012:** Adaptar testes de webhook e rodar suíte total
+- [x] **T-012:** Adaptar testes de webhook e rodar suíte total
+  - **CONCLUÍDA:** nenhum teste de webhook precisou mudar de expectativa — comportamento e status
+    HTTP preservados (mapeamento `_LEGACY_ORCH_STATUS` + campo `extra`). Suíte 542/542 verde.
   - **Descrição:** Ajustar `test_main_webhook`/`test_webhook_state_flows` aos novos `status` quando
     necessário (migração consciente); suíte total verde.
   - **Arquivos envolvidos:** `tests/test_main_webhook.py`, `tests/test_webhook_state_flows.py`
@@ -114,7 +124,7 @@
 
 ### Fase 4: Documentação e Finalização
 
-- [ ] **T-013:** Atualizar status e índice
+- [x] **T-013:** Atualizar status e índice
   - **Descrição:** Marcar CA, status 🟢 no `spec.md`, atualizar README. Avaliar necessidade de `016b`.
   - **Arquivos envolvidos:** `implementações/016 - Orquestrador Deterministico/spec.md`,
     `implementações/README.md`

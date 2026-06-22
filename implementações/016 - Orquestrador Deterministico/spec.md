@@ -1,7 +1,7 @@
 # Orquestrador Determinístico
 
 > **ID:** 016
-> **Status:** 🔵 Em Andamento
+> **Status:** 🟢 Concluída (escopo seguro)
 > **Prioridade:** 🔴 Crítica
 > **Criada em:** 2026-06-22
 > **Última atualização:** 2026-06-22
@@ -175,9 +175,26 @@ CA-001..CA-005; suíte total verde.
 > **Decisão de escopo (2026-06-22, dono do produto):** a parte de **criação/remarcação atômica**
 > do `_handle_offered_slot_selection` (impls 000/005/006) é mantida no handler provado e NÃO é
 > migrada para a FSM — é a transição de maior risco e já está verde. O orquestrador assume apenas
-> a parte SEGURA (que não altera o calendário): geração de oferta e **seleção de horário**
-> (`try_slot_selection`), deferindo a confirmação afirmativa ao handler provado. Isso entrega a
-> fonte única de decisão para o caminho comum e habilita o 017 sem arriscar marcar/remarcar.
+> a parte SEGURA (que não altera o calendário): **seleção de horário** (`try_slot_selection`) e
+> **re-oferta reativa** (`try_reactive_reoffer`), deferindo a confirmação afirmativa ao handler
+> provado. Isso entrega a fonte única de decisão para os fluxos estruturados sem arriscar marcar/remarcar.
+>
+> **Reavaliação da oferta INICIAL e do 017 (2026-06-22):** tentou-se migrar a oferta inicial
+> (gerada hoje pelo LLM) para o orquestrador (`try_initial_offer`). A suíte mostrou que isso
+> **rouba do LLM uma conversa que ele trata bem** (ex.: "primeira segunda-feira, menos dia 1") e
+> depende do calendário — mudança de UX por ganho de confiabilidade ~nulo, já que o "ofertar" do
+> LLM **já é guardado** (só horários validados por ferramenta; agendar fora da oferta é bloqueado).
+> Decisão: **manter o LLM** para a conversa aberta (saudação, perguntar preferência, fora-de-escopo,
+> tom) e **NÃO** perseguir a remoção total do LLM (017 reavaliado como over-engineering com risco de
+> UX). O "cérebro duplo" de **decisão** está resolvido: o orquestrador é a fonte única das decisões
+> estruturadas de agenda; o LLM ficou subordinado e guardado.
+
+## 10. Tarefas reavaliadas (não perseguidas)
+
+- **T-005 (oferta inicial):** revertida — ver §9. O LLM (guardado) segue ofertando no início.
+- **T-009 (remarcação atômica):** cancelada por decisão de risco — fica no handler provado.
+- **T-010 (rewire total do webhook):** descopada — handlers provados permanecem via deferimento.
+- **017 (aposentar o LLM):** reavaliada como não recomendada (UX vs. ganho ~nulo de confiabilidade).
 
 - A FSM é a **fronteira anti-regressão**: o LLM nunca mais decide agenda, só descreve (NLU) e
   conversa (tom). É isso que impede o "cérebro duplo" de ressurgir.

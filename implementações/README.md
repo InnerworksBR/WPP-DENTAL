@@ -65,10 +65,15 @@ usando os 488 testes como catraca anti-regressão. Trabalho na branch `refactor/
 |---|---|---|---|---|---|
 | 014 | Gateway de Transporte | 🟢 Concluída | 🟠 Alta | Isola a Evolution atrás de `MessagingGateway` + `EvolutionAdapter`; transporte trocável; tira plumbing do `app.py` | 9 |
 | 015 | NLU Estruturada | 🟢 Concluída | 🟠 Alta | `IntentClassifier` único: mensagem → `{intent, entities}` validado; consolida heurísticas dispersas | 8 |
-| 016 | Orquestrador Determinístico | 🔵 Em Andamento | 🔴 Crítica | FSM explícita dona das decisões de agenda; absorve os `_handle_*`; fim do regex-na-prosa | 13 |
-| 017 | Aposentar o Cérebro Duplo | 🟡 Planejada | 🟠 Alta | Remove o loop decisor do LLM e os guard-rails; `app.py` vira controlador fino; 1 fonte de verdade | 8 |
+| 016 | Orquestrador Determinístico | 🟢 Concluída (escopo seguro) | 🔴 Crítica | FSM dona das decisões estruturadas (nome/plano, cancelamento, seleção, re-oferta) em produção; criação/remarcação atômica mantida no handler provado por decisão de risco | 13 |
+| 017 | Aposentar o Cérebro Duplo | ⚪ Reavaliada (não recomendada) | 🟠 Alta | Remoção total do LLM reavaliada como over-engineering: o "ofertar" do LLM já é guardado; manter o LLM para conversa aberta/tom. O cérebro duplo de DECISÃO já foi resolvido na 016 | — |
 
-**Sequência obrigatória:** 014 → 015 → 016 → 017 (cadeia; cada uma depende da anterior).
+**Sequência:** 014 → 015 → 016 (escopo seguro concluído). 017 reavaliada — ver `016/spec.md` §9/§10.
+
+> **Resultado da Fase 2:** o orquestrador determinístico (`src/application/flow/`) é a fonte única
+> das decisões estruturadas de agenda, religado no `app.py` via deferimento incremental, com os
+> handlers provados de criação/remarcação intactos. Transporte isolado (014), NLU consolidada (015).
+> Suíte **542/542** verde na branch `refactor/nucleo-conversa`. Nada foi para a `main`.
 
 ---
 
