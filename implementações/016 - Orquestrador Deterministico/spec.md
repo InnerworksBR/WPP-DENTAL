@@ -1,7 +1,7 @@
 # Orquestrador Determinístico
 
 > **ID:** 016
-> **Status:** 🟡 Planejada
+> **Status:** 🔵 Em Andamento
 > **Prioridade:** 🔴 Crítica
 > **Criada em:** 2026-06-22
 > **Última atualização:** 2026-06-22

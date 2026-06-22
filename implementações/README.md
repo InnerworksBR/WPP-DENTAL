@@ -65,7 +65,7 @@ usando os 488 testes como catraca anti-regressão. Trabalho na branch `refactor/
 |---|---|---|---|---|---|
 | 014 | Gateway de Transporte | 🟢 Concluída | 🟠 Alta | Isola a Evolution atrás de `MessagingGateway` + `EvolutionAdapter`; transporte trocável; tira plumbing do `app.py` | 9 |
 | 015 | NLU Estruturada | 🟢 Concluída | 🟠 Alta | `IntentClassifier` único: mensagem → `{intent, entities}` validado; consolida heurísticas dispersas | 8 |
-| 016 | Orquestrador Determinístico | 🟡 Planejada | 🔴 Crítica | FSM explícita dona das decisões de agenda; absorve os `_handle_*`; fim do regex-na-prosa | 13 |
+| 016 | Orquestrador Determinístico | 🔵 Em Andamento | 🔴 Crítica | FSM explícita dona das decisões de agenda; absorve os `_handle_*`; fim do regex-na-prosa | 13 |
 | 017 | Aposentar o Cérebro Duplo | 🟡 Planejada | 🟠 Alta | Remove o loop decisor do LLM e os guard-rails; `app.py` vira controlador fino; 1 fonte de verdade | 8 |
 
 **Sequência obrigatória:** 014 → 015 → 016 → 017 (cadeia; cada uma depende da anterior).

@@ -2,7 +2,7 @@
 
 > **Implementação:** 016 - Orquestrador Determinístico
 > **Spec:** [spec.md](./spec.md)
-> **Progresso:** 0/13 tarefas concluídas (0%)
+> **Progresso:** 3/13 tarefas concluídas (23%)
 > **Última atualização:** 2026-06-22
 
 ---
@@ -17,7 +17,7 @@
 
 ### Fase 1: Preparação e Setup
 
-- [ ] **T-001:** Definir estados e transições
+- [x] **T-001:** Definir estados e transições
   - **Descrição:** Criar `flow/states.py` com o enum `FlowState` e a tabela de transições mapeando
     os `stage` atuais (`awaiting_name_for_slot_confirmation`, etc.) para estados explícitos.
   - **Arquivos envolvidos:** `src/application/flow/states.py`, `src/application/flow/__init__.py`
@@ -25,7 +25,7 @@
   - **Dependências:** 014, 015 concluídas
   - **Estimativa:** Média
 
-- [ ] **T-002:** Definir `OrchestratorResult` e `Effect`
+- [x] **T-002:** Definir `OrchestratorResult` e `Effect`
   - **Descrição:** Estruturas de saída (texto, próximo estado, efeitos, status) com mapeamento dos
     `status` HTTP atuais.
   - **Arquivos envolvidos:** `src/application/flow/orchestrator.py`
@@ -35,14 +35,14 @@
 
 ### Fase 2: Implementação Core (migrar um handler por vez, suíte verde a cada passo)
 
-- [ ] **T-003:** Esqueleto do orquestrador + IDLE/saudação/coleta de intenção
+- [x] **T-003:** Esqueleto do orquestrador + IDLE/saudação/coleta de intenção
   - **Descrição:** `handle()` monta `NluContext`, classifica (015) e trata IDLE → intenção.
   - **Arquivos envolvidos:** `src/application/flow/orchestrator.py`
   - **Critério de conclusão:** Mensagem inicial e roteamento de intenção funcionam por teste.
   - **Dependências:** T-002
   - **Estimativa:** Média
 
-- [ ] **T-004:** Coleta de nome e plano (migrar `_handle_pending_slot_name/_plan`)
+- [~] **T-004:** Coleta de nome e plano (migrar `_handle_pending_slot_name/_plan`)
   - **Descrição:** Estados PRECISA_NOME/PRECISA_PLANO com as validações atuais (nome válido, plano
     direto vs encaminhamento).
   - **Arquivos envolvidos:** `src/application/flow/orchestrator.py`, `src/interfaces/http/app.py`
@@ -126,10 +126,10 @@
 
 | Tarefa | Status | Data de Conclusão | Observações |
 |--------|--------|-------------------|-------------|
-| T-001  | ⬜ Pendente | — | — |
-| T-002  | ⬜ Pendente | — | — |
-| T-003  | ⬜ Pendente | — | — |
-| T-004  | ⬜ Pendente | — | — |
+| T-001  | ✅ Concluída | 2026-06-22 | `flow/states.py` (FlowState == stages atuais) |
+| T-002  | ✅ Concluída | 2026-06-22 | `OrchestratorResult` + `Effect` + flag `handled` (deferimento) |
+| T-003  | ✅ Concluída | 2026-06-22 | Esqueleto + `build_context` + roteamento via NLU |
+| T-004  | 🔄 Em andamento | — | Scaffold de nome/plano + escalação; falta paridade total + wiring |
 | T-005  | ⬜ Pendente | — | — |
 | T-006  | ⬜ Pendente | — | — |
 | T-007  | ⬜ Pendente | — | — |
