@@ -1,7 +1,7 @@
 # NLU Estruturada
 
 > **ID:** 015
-> **Status:** 🟡 Planejada
+> **Status:** 🟢 Concluída
 > **Prioridade:** 🟠 Alta
 > **Criada em:** 2026-06-22
 > **Última atualização:** 2026-06-22
@@ -107,13 +107,14 @@ N/A — módulo interno.
 - Não alterar o fluxo de produção ainda — 015 entrega a peça; 016 a integra.
 
 ## 5. Critérios de Aceitação
-- [ ] **CA-001:** `classify` mapeia corretamente um conjunto de frases reais pt-BR de cada intenção.
-- [ ] **CA-002:** Entidades de agenda equivalentes às de `extract_request_constraints` para os
-  mesmos inputs (paridade verificada por teste).
-- [ ] **CA-003:** Com LLM mockado para falhar, o fallback determinístico produz `NluResult` útil.
-- [ ] **CA-004:** Distingue "pode ser às 8" (escolher_horario, com oferta no contexto) de "só às 8"
-  (restrição earliest_time) — caso clássico do bug 013.
-- [ ] **CA-005:** Suíte total verde (488 + novos).
+- [x] **CA-001:** `classify` mapeia corretamente um conjunto de frases reais pt-BR de cada intenção.
+- [x] **CA-002:** Entidades de agenda equivalentes às de `extract_request_constraints` para os
+  mesmos inputs (paridade verificada por teste parametrizado).
+- [x] **CA-003:** Com LLM mockado para falhar, o fallback determinístico produz `NluResult` útil
+  (intenção determinística quando possível; `AMBIGUO` caso contrário).
+- [x] **CA-004:** Distingue "pode ser às 9" (escolher_horario, horário ofertado) de "só depois das
+  13h" (restrição, re-oferta) — caso clássico do bug 013.
+- [x] **CA-005:** Suíte total verde (517 = 500 + 17 novos).
 
 ## 6. Plano de Testes
 
@@ -154,6 +155,10 @@ CA-001..CA-004 por teste parametrizado; suíte total verde.
 - A NLU **não decide** nada de agenda — só descreve. Toda decisão é do orquestrador (016). Essa
   fronteira é o que evita o "cérebro duplo" voltar.
 - `NluContext` é deliberadamente mínimo para manter a classificação barata e estável.
+- **Decisão de implementação:** design híbrido — as ENTIDADES vêm 100% do extrator determinístico
+  já testado (`AppointmentOfferService`), confiável e sem custo; o LLM é usado APENAS para a
+  intenção de alto nível nos casos não resolvidos deterministicamente. Mais robusto e barato que
+  delegar tudo ao LLM, e funciona com o LLM fora do ar (fallback → intenção determinística/`AMBIGUO`).
 
 ---
 

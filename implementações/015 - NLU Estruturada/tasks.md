@@ -2,7 +2,7 @@
 
 > **Implementação:** 015 - NLU Estruturada
 > **Spec:** [spec.md](./spec.md)
-> **Progresso:** 0/8 tarefas concluídas (0%)
+> **Progresso:** 8/8 tarefas concluídas (100%)
 > **Última atualização:** 2026-06-22
 
 ---
@@ -17,7 +17,7 @@
 
 ### Fase 1: Preparação e Setup
 
-- [ ] **T-001:** Definir o schema de NLU
+- [x] **T-001:** Definir o schema de NLU
   - **Descrição:** Criar `nlu/schema.py` com `Intent` (enum), `Entities` e `NluResult` (Pydantic),
     e `NluContext` (oferta pendente, confirmação pendente, período/dia já pedidos).
   - **Arquivos envolvidos:** `src/application/nlu/schema.py`, `src/application/nlu/__init__.py`
@@ -25,7 +25,7 @@
   - **Dependências:** Nenhuma
   - **Estimativa:** Pequena
 
-- [ ] **T-002:** Mapear o vocabulário do extrator atual
+- [x] **T-002:** Mapear o vocabulário do extrator atual
   - **Descrição:** Levantar de `extract_request_constraints` todas as entidades/sinais já suportados
     para garantir paridade no fallback e no schema.
   - **Arquivos envolvidos:** `src/domain/policies/appointment_offer_service.py` (leitura)
@@ -35,7 +35,7 @@
 
 ### Fase 2: Implementação Core
 
-- [ ] **T-003:** Classificação via LLM estruturado
+- [x] **T-003:** Classificação via LLM estruturado
   - **Descrição:** Implementar `IntentClassifier.classify` com `with_structured_output(NluResult)`,
     `temperature=0`, prompt enxuto que recebe a mensagem + `NluContext`.
   - **Arquivos envolvidos:** `src/application/nlu/intent_classifier.py`
@@ -43,7 +43,7 @@
   - **Dependências:** T-001
   - **Estimativa:** Média
 
-- [ ] **T-004:** Fallback determinístico
+- [x] **T-004:** Fallback determinístico
   - **Descrição:** Mapear `extract_request_constraints` + heurísticas mínimas para `NluResult`,
     acionado quando o LLM falha/saída inválida.
   - **Arquivos envolvidos:** `src/application/nlu/intent_classifier.py`
@@ -51,7 +51,7 @@
   - **Dependências:** T-002, T-003
   - **Estimativa:** Média
 
-- [ ] **T-005:** Desambiguação escolha-vs-restrição
+- [x] **T-005:** Desambiguação escolha-vs-restrição
   - **Descrição:** Usar `NluContext` para decidir "pode ser às 8" (escolher) vs "só às 8"
     (earliest_time), resolvendo o caso do bug 013.
   - **Arquivos envolvidos:** `src/application/nlu/intent_classifier.py`
@@ -61,14 +61,14 @@
 
 ### Fase 3: Testes e Validação
 
-- [ ] **T-006:** Testes da NLU (intenções + entidades)
+- [x] **T-006:** Testes da NLU (intenções + entidades)
   - **Descrição:** `test_intent_classifier.py` parametrizado por frase real → resultado esperado.
   - **Arquivos envolvidos:** `tests/test_intent_classifier.py`
   - **Critério de conclusão:** CA-001..CA-004 verdes.
   - **Dependências:** T-003, T-004, T-005
   - **Estimativa:** Média
 
-- [ ] **T-007:** Teste de paridade com o extrator atual
+- [x] **T-007:** Teste de paridade com o extrator atual
   - **Descrição:** Para um conjunto de inputs, comparar entidades do fallback com
     `extract_request_constraints`.
   - **Arquivos envolvidos:** `tests/test_intent_classifier.py`
@@ -78,7 +78,7 @@
 
 ### Fase 4: Documentação e Finalização
 
-- [ ] **T-008:** Suíte total + status
+- [x] **T-008:** Suíte total + status
   - **Descrição:** Rodar `pytest -q` (488 + novos verdes); atualizar `spec.md` (status 🟢) e o README.
   - **Arquivos envolvidos:** `implementações/015 - NLU Estruturada/spec.md`, `implementações/README.md`
   - **Critério de conclusão:** Suíte verde; índice atualizado; commit na branch.
@@ -91,14 +91,14 @@
 
 | Tarefa | Status | Data de Conclusão | Observações |
 |--------|--------|-------------------|-------------|
-| T-001  | ⬜ Pendente | — | — |
-| T-002  | ⬜ Pendente | — | — |
-| T-003  | ⬜ Pendente | — | — |
-| T-004  | ⬜ Pendente | — | — |
-| T-005  | ⬜ Pendente | — | — |
-| T-006  | ⬜ Pendente | — | — |
-| T-007  | ⬜ Pendente | — | — |
-| T-008  | ⬜ Pendente | — | — |
+| T-001  | ✅ Concluída | 2026-06-22 | `nlu/schema.py` (Intent, Entities, NluContext, NluResult) |
+| T-002  | ✅ Concluída | 2026-06-22 | Reusa `AppointmentOfferService` como base de entidades |
+| T-003  | ✅ Concluída | 2026-06-22 | LLM estruturado p/ intenção de alto nível |
+| T-004  | ✅ Concluída | 2026-06-22 | Fallback determinístico + `AMBIGUO` |
+| T-005  | ✅ Concluída | 2026-06-22 | Escolha-vs-restrição via `NluContext` (CA-004) |
+| T-006  | ✅ Concluída | 2026-06-22 | `test_intent_classifier.py` (17 testes) |
+| T-007  | ✅ Concluída | 2026-06-22 | Paridade parametrizada com o extrator |
+| T-008  | ✅ Concluída | 2026-06-22 | Suíte 517/517 verde |
 
 ---
 
