@@ -32,6 +32,9 @@ class _FakeConfig:
     def get_openai_model(self):
         return "gpt-4o-mini"
 
+    def get_suggestions_count(self):
+        return 2
+
 
 class _FakeLLM:
     def __init__(self, intent="outro"):
@@ -42,11 +45,15 @@ class _FakeLLM:
 
 
 class _FakeCalendar:
-    def __init__(self, events):
-        self._events = events
+    def __init__(self, events=None, slots=None):
+        self._events = events or []
+        self._slots = slots
 
     def find_appointments_by_phone(self, phone):
         return self._events
+
+    def find_next_available_slots(self, **kwargs):
+        return self._slots
 
 
 def _orch(plan=None, llm_intent="outro", calendar=None, direct_plan=None):
@@ -269,4 +276,37 @@ def test_slot_selection_not_among_options_is_rejected():
 
 def test_slot_selection_name_uncertain_defers():
     res = _orch().try_slot_selection("1", _offer_state(), "5511999999999", "5511999999999", [])
+    assert res.handled is False
+
+
+# ── Re-oferta reativa (try_reactive_reoffer) ────────────────────────────────────
+
+
+def test_reactive_reoffer_with_slots():
+    cal = _FakeCalendar(slots={"date_str": "24/06/2026", "times": ["08:00", "09:00"]})
+    res = _orch(calendar=cal).try_reactive_reoffer("quero outro dia", ConversationState(), "p", [])
+    assert res.handled is True
+    assert res.status == "reactive_reoffer"
+    assert res.next_state.offered_date == "24/06/2026"
+    assert res.next_state.offered_times == ["08:00", "09:00"]
+    assert res.extra["offered_date"] == "24/06/2026"
+    assert "08:00" in res.reply_text
+
+
+def test_reactive_reoffer_no_slots():
+    res = _orch(calendar=_FakeCalendar(slots=None)).try_reactive_reoffer(
+        "quero outro dia", ConversationState(), "p", []
+    )
+    assert res.handled is True
+    assert res.status == "reoffer_none"
+
+
+def test_reactive_reoffer_error_defers():
+    class _BoomCal:
+        def find_next_available_slots(self, **kwargs):
+            raise RuntimeError("boom")
+
+    res = _orch(calendar=_BoomCal()).try_reactive_reoffer(
+        "quero outro dia", ConversationState(), "p", []
+    )
     assert res.handled is False

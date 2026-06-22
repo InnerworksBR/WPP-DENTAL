@@ -2,7 +2,7 @@
 
 > **Implementação:** 016 - Orquestrador Determinístico
 > **Spec:** [spec.md](./spec.md)
-> **Progresso:** 6/13 tarefas concluídas (46%)
+> **Progresso:** 7/13 tarefas concluídas (54%)
 > **Última atualização:** 2026-06-22
 
 ---
@@ -67,7 +67,7 @@
   - **Dependências:** T-004, T-005
   - **Estimativa:** Grande
 
-- [ ] **T-007:** Re-oferta reativa (migrar `_handle_reactive_reoffer` / impl 013)
+- [x] **T-007:** Re-oferta reativa (migrar `_handle_reactive_reoffer` / impl 013)
   - **Descrição:** Recusa ampla + horário/dia específico re-ofertam corretamente.
   - **Arquivos envolvidos:** `src/application/flow/orchestrator.py`
   - **Critério de conclusão:** Testes do 013 verdes (ou migrados). CA-003.
@@ -133,8 +133,8 @@
 | T-003  | ✅ Concluída | 2026-06-22 | Esqueleto + `build_context` + roteamento via NLU |
 | T-004  | ✅ Concluída | 2026-06-22 | Nome/plano migrados fielmente e religados no webhook (status legados preservados); handler antigo vira fallback de borda |
 | T-005  | ⬜ Pendente | — | — |
-| T-006  | ⬜ Pendente | — | — |
-| T-007  | ⬜ Pendente | — | — |
+| T-006  | ✅ Concluída | 2026-06-22 | Seleção migrada (`try_slot_selection`); criação/remarcação mantida no handler provado (escopo) |
+| T-007  | ✅ Concluída | 2026-06-22 | `try_reactive_reoffer` migrado e religado (impl 013); só consulta o calendário |
 | T-008  | ✅ Concluída | 2026-06-22 | `try_cancellation` migrado e religado; execução do "SIM" segue no handler de confirmação (a migrar com T-006) |
 | T-009  | ⬜ Pendente | — | — |
 | T-010  | ⬜ Pendente | — | — |

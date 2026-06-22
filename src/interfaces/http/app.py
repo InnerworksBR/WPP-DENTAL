@@ -379,7 +379,20 @@ async def receive_message(request: Request):
         AppointmentConfirmationService.CONFIRMATION_STAGE,
     }:
         # 013-A/B: paciente recusou a oferta ou pediu horario/dia especifico -> re-ofertar
+        # 016: orquestrador assume a re-oferta (so consulta o calendario); handler antigo e fallback.
         if constraints_changed and had_offer_context:
+            reoffer_result = orchestrator.try_reactive_reoffer(
+                text, ConversationStateService.get(phone), phone, recent_history
+            )
+            if reoffer_result.handled:
+                return await _respond_orchestrator(
+                    reoffer_result,
+                    phone=phone,
+                    text=text,
+                    contact_name=contact_name,
+                    message_id=message_id,
+                )
+
             reoffer_response = await _handle_reactive_reoffer(
                 phone=phone,
                 text=text,

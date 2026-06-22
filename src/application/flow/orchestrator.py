@@ -21,7 +21,7 @@ from ..services.conversation_state_service import ConversationState
 from ..services.patient_service import PatientService
 from ...domain.policies.appointment_offer_service import AppointmentOffer, AppointmentOfferService
 from ...infrastructure.config.config_service import ConfigService
-from ...infrastructure.integrations.calendar_service import CalendarService
+from ...infrastructure.integrations.calendar_service import CalendarService, SAO_PAULO_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +177,71 @@ class ConversationOrchestrator:
             next_state=next_state,
             status="slot_confirmation_requested",
             extra={"selected_time": selected_time},
+        )
+
+    def try_reactive_reoffer(
+        self, message: str, state: ConversationState, phone: str, history: list[dict]
+    ) -> OrchestratorResult:
+        """Re-oferta determinística (impl 013): quando o paciente recusa ou pede horário/dia
+        específico não ofertado, busca novos horários respeitando as restrições do estado.
+        Só consulta o calendário (não altera). Defere em caso de falha na busca."""
+        start_date = None
+        if state.requested_date:
+            try:
+                start_date = datetime.strptime(state.requested_date, "%d/%m/%Y").replace(tzinfo=SAO_PAULO_TZ)
+            except ValueError:
+                start_date = None
+        if start_date is None:
+            ctx = (
+                AppointmentOfferService.extract_latest_offer(history)
+                or AppointmentOfferService.extract_latest_confirmation_request(history)
+            )
+            ctx_date = getattr(ctx, "date_str", "") if ctx else ""
+            if ctx_date:
+                try:
+                    start_date = datetime.strptime(ctx_date, "%d/%m/%Y").replace(tzinfo=SAO_PAULO_TZ)
+                except ValueError:
+                    start_date = None
+        if start_date is None:
+            start_date = datetime.now(SAO_PAULO_TZ)
+
+        try:
+            result = self._calendar_service().find_next_available_slots(
+                start_date=start_date,
+                period=state.requested_period or None,
+                earliest_time=state.earliest_time or "",
+                exclude_dates=state.excluded_dates,
+                exclude_slots=state.rejected_slots,
+                limit=self._config.get_suggestions_count(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[orchestrator] reoferta: falha na busca: %s", exc, exc_info=True)
+            return _deferred()
+
+        if not result:
+            return OrchestratorResult(
+                handled=True,
+                reply_text=(
+                    "Nao encontrei horario livre com essa preferencia nos proximos dias. 😕\n"
+                    "Quer que eu veja outro dia ou periodo?"
+                ),
+                next_state=state,
+                status="reoffer_none",
+            )
+
+        next_state = _clone(state)
+        next_state.offered_date = result["date_str"]
+        next_state.offered_times = list(result["times"])
+        options = "\n".join(f"{index}. {t}" for index, t in enumerate(result["times"], 1))
+        return OrchestratorResult(
+            handled=True,
+            reply_text=(
+                f"Tenho estes horarios disponiveis em {result['date_str']}:\n{options}\n\n"
+                "Qual voce prefere?"
+            ),
+            next_state=next_state,
+            status="reactive_reoffer",
+            extra={"offered_date": result["date_str"]},
         )
 
     def _resolve_valid_plan_name(self, state: ConversationState, phone: str) -> str:
