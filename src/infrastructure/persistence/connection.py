@@ -84,6 +84,20 @@ CREATE TABLE IF NOT EXISTS pending_alerts (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 019: cobertura do cron de lembretes. Registra quem NAO recebeu lembrete e o
+-- motivo, para o relatorio diario a clinica e para o painel /admin (fim do
+-- descarte silencioso). 'outcome' = 'skipped' | 'failed'.
+CREATE TABLE IF NOT EXISTS reminder_coverage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date TEXT NOT NULL,
+    event_id TEXT,
+    patient_name TEXT,
+    phone TEXT,
+    outcome TEXT NOT NULL,
+    reason TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_patients_phone ON patients(phone);
 CREATE INDEX IF NOT EXISTS idx_interactions_patient ON interactions(patient_id);
 CREATE INDEX IF NOT EXISTS idx_conversation_phone ON conversation_history(phone);
@@ -92,6 +106,7 @@ CREATE INDEX IF NOT EXISTS idx_processed_messages_at ON processed_messages(proce
 CREATE INDEX IF NOT EXISTS idx_appointment_confirmations_phone ON appointment_confirmations(phone);
 CREATE INDEX IF NOT EXISTS idx_appointment_confirmations_status ON appointment_confirmations(status);
 CREATE INDEX IF NOT EXISTS idx_outbound_messages_phone ON outbound_messages(phone);
+CREATE INDEX IF NOT EXISTS idx_reminder_coverage_run_date ON reminder_coverage(run_date);
 """
 
 

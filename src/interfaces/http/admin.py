@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from ...infrastructure.config.config_service import ConfigService
 from ...infrastructure.integrations.calendar_service import CalendarService, SAO_PAULO_TZ
 from ...infrastructure.persistence.connection import get_db
+from ...infrastructure.persistence.reminder_coverage_store import ReminderCoverageStore
 
 load_dotenv()
 
@@ -318,6 +319,40 @@ async def list_errors(request: Request, limit: int = 50) -> dict[str, Any]:
     except Exception as exc:
         _admin_logger.error("Erro em list_errors: %s", exc, exc_info=True)
         raise HTTPException(status_code=503, detail="Falha ao listar erros.")
+
+
+@router.get("/api/coverage")
+async def reminder_coverage(request: Request, run_date: str = "") -> dict[str, Any]:
+    """019: cobertura do cron de lembretes — quem NÃO recebeu lembrete e por quê.
+
+    Sem `run_date`, retorna a execução mais recente. `enviados` vem das confirmações com status
+    'sent' do dia; `misses` (pulados/falhas) vêm de `reminder_coverage`."""
+    _require_admin(request)
+    try:
+        target = (run_date or "").strip() or ReminderCoverageStore.latest_run_date()
+        misses = ReminderCoverageStore.get_misses(run_date=target) if target else []
+        sent = 0
+        if target:
+            db = get_db()
+            row = db.execute(
+                "SELECT COUNT(*) AS cnt FROM appointment_confirmations "
+                "WHERE appointment_start LIKE ? AND status = 'sent'",
+                (f"{target}%",),
+            ).fetchone()
+            sent = int(row["cnt"]) if row else 0
+        skipped = [m for m in misses if m.get("outcome") != "failed"]
+        failed = [m for m in misses if m.get("outcome") == "failed"]
+        return {
+            "ok": True,
+            "run_date": target,
+            "sent": sent,
+            "skipped": len(skipped),
+            "failed": len(failed),
+            "misses": misses,
+        }
+    except Exception as exc:
+        _admin_logger.error("Erro em reminder_coverage: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Falha ao consultar cobertura de lembretes.")
 
 
 @router.get("/api/appointments")

@@ -91,11 +91,12 @@ descartada). O escopo fica nas duas correções determinísticas; nenhuma troca 
 | # | Implementação | Status | Prioridade | Escopo (resumo) | Sintoma | ~Tarefas |
 |---|---|---|---|---|---|---|
 | 018 | Fronteira da Oferta Determinística | 🟢 Concluída (escopo seguro) | 🔴 Crítica | FSM gera a **oferta inicial** como dado estruturado (`try_initial_offer`), caminho primário; mensagem == estado; seleção casa contra `offered_times`. Regex/tools do LLM mantidos como fallback (remoção total = RF-003-B). Suíte **552** verde | (a) repete + (b) horário errado | 13 (10 feitas + 3 deferidas) |
-| 019 | Lembretes Confiáveis e Cobertura Total | 🟡 Planejada | 🔴 Crítica | Acaba o descarte silencioso do cron: relatório diário à clínica (`enviados/pulados/falhas` + nome/motivo), fila de re-tentativa, pendências no `/admin`, teste por caminho de descarte | (c) não chega a todos | 13 |
+| 019 | Lembretes Confiáveis e Cobertura Total | 🟢 Concluída | 🔴 Crítica | Acaba o descarte silencioso: cada não contatado é registrado (nome+motivo) em `reminder_coverage`; **relatório diário** à clínica (`enviados/pulados/falhas`); re-tentativa cross-run + surfacing; `GET /admin/api/coverage`. Suíte **562** verde | (c) não chega a todos | 13 |
 
-**Sequência:** 018 → 019 (independentes entre si; 018 está pronta para começar — não depende de
-nenhuma decisão em aberto). **Fases C/D do documento (Ollama, WhatsApp oficial) NÃO entram** por
-decisão do dono. A **Fase E** (merge para `main` + deploy no EasyPanel) ocorre após 018 e 019 verdes.
+**Sequência:** 018 ✅ → 019 ✅ (ambas concluídas em 2026-06-23 na branch
+`fix/fase-3-correcoes-018-019`, suíte **562/562** verde). **Fases C/D do documento (Ollama, WhatsApp
+oficial) NÃO entram** por decisão do dono. **Fase E pendente:** merge para `main` + redeploy no
+EasyPanel (aguarda aval do dono — nada foi para a `main`).
 
 > **Mapa sintoma → implementação (Fase 3):** (a) "repete" → **018** · (b) "horário errado" → **018** ·
 > (c) "lembrete não chega a todos" → **019**.

@@ -17,6 +17,8 @@ from ...infrastructure.config.config_service import ConfigService
 from ...infrastructure.integrations.calendar_service import CalendarService, SAO_PAULO_TZ
 from ...infrastructure.integrations.whatsapp_service import WhatsAppService
 from ...infrastructure.persistence.connection import get_db
+from ...infrastructure.persistence.failed_alert_store import FailedAlertStore
+from ...infrastructure.persistence.reminder_coverage_store import ReminderCoverageStore
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +261,76 @@ class AppointmentConfirmationService:
                 unique_by_phone_event[key] = appointment
         return sorted(unique_by_phone_event.values(), key=lambda item: item["start_time"])
 
+    @staticmethod
+    def _record_skip(
+        skipped: list[dict[str, Any]],
+        appointment: dict[str, Any],
+        reason: str,
+        category: str = "skipped",
+    ) -> None:
+        """019: registra um paciente NÃO contatado com nome + motivo, para o relatório e o /admin.
+
+        `category` distingue 'skipped' (pulado recuperável: sem telefone, conversa em andamento,
+        dados inválidos) de 'failed' (falha de envio/exceção)."""
+        skipped.append(
+            {
+                "name": str(appointment.get("patient_name", "") or "").strip() or "(sem nome)",
+                "phone": str(appointment.get("patient_phone", "") or "").strip(),
+                "event_id": str(appointment.get("event_id", "") or "").strip(),
+                "reason": reason,
+                "category": category,
+            }
+        )
+
+    def _build_coverage_report(self, target_date, skipped: list[dict[str, Any]], sent: int) -> str:
+        """Monta o relatório diário de cobertura para a clínica (enviados/pulados/falhas)."""
+        date_str = target_date.strftime("%d/%m/%Y") if hasattr(target_date, "strftime") else str(target_date)
+        pulados = [s for s in skipped if s.get("category") != "failed"]
+        falhas = [s for s in skipped if s.get("category") == "failed"]
+        lines = [
+            f"Relatorio de lembretes — consultas de {date_str}",
+            "",
+            f"Enviados: {sent}",
+            f"Pulados: {len(pulados)}",
+            f"Falhas: {len(falhas)}",
+        ]
+        if skipped:
+            lines.append("")
+            lines.append("Pacientes que NAO receberam lembrete (acionar manualmente):")
+            for item in skipped:
+                phone = f" — {item['phone']}" if item.get("phone") else ""
+                lines.append(f"- {item['name']}{phone}: {item['reason']}")
+        else:
+            lines.append("")
+            lines.append("Todos os pacientes do dia foram contatados.")
+        return "\n".join(lines)
+
+    async def _send_coverage_report(self, target_date, skipped: list[dict[str, Any]], sent: int) -> bool:
+        """Envia o relatório diário à clínica. Nunca falha em silêncio: persiste em pending_alerts
+        se o envio falhar (RF-006). Não envia se DOCTOR_PHONE não estiver configurado."""
+        doctor_phone = self.config.get_doctor_phone()
+        if not doctor_phone:
+            logger.info("[confirmacao] relatorio de cobertura nao enviado: DOCTOR_PHONE ausente")
+            return False
+        message = self._build_coverage_report(target_date, skipped, sent)
+        try:
+            delivered = await self.whatsapp.send_message(doctor_phone, message)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[confirmacao] erro ao enviar relatorio de cobertura: %s", exc, exc_info=True)
+            delivered = False
+        if not delivered:
+            logger.critical(
+                "[confirmacao] FALHA ao enviar relatorio de cobertura — persistindo para reenvio manual"
+            )
+            FailedAlertStore.record(
+                doctor_phone=doctor_phone,
+                patient_phone="",
+                patient_name="(relatorio de cobertura)",
+                message=message,
+                reason="coverage_report_delivery_failed",
+            )
+        return delivered
+
     def _build_confirmation_state(
         self,
         *,
@@ -302,13 +374,25 @@ class AppointmentConfirmationService:
             "skipped_busy": 0,
             "failed": 0,
         }
+        # 019: registro observável de TODO paciente não contatado (fim do descarte silencioso).
+        skipped_details: list[dict[str, Any]] = []
 
-        for appointment in self._select_unique_appointments(appointments):
+        # 019: consultas sem telefone resolvido viram pendência visível (antes eram descartadas em
+        # silêncio no _select_unique_appointments, gerando só um warning de log).
+        resolvable: list[dict[str, Any]] = []
+        for appointment in appointments:
+            if str(appointment.get("patient_phone", "")).strip():
+                resolvable.append(appointment)
+            else:
+                self._record_skip(skipped_details, appointment, "sem telefone (sem cadastro unico pelo nome)")
+
+        for appointment in self._select_unique_appointments(resolvable):
             stats["candidates"] += 1
             phone = self.build_conversation_phone(str(appointment.get("patient_phone", "")).strip())
             event_id = str(appointment.get("event_id", "")).strip()
             start_time = appointment.get("start_time")
             if not phone or not event_id or not isinstance(start_time, datetime):
+                self._record_skip(skipped_details, appointment, "dados invalidos (telefone/evento/horario)")
                 continue
 
             try:
@@ -328,6 +412,7 @@ class AppointmentConfirmationService:
                             (datetime.utcnow() - updated_at).total_seconds() / 60,
                         )
                         stats["skipped_busy"] += 1
+                        self._record_skip(skipped_details, appointment, "conversa em andamento (recente)")
                         continue
                     # CO-07: nao apagar conversa em andamento; apenas pular
                     logger.info(
@@ -335,6 +420,7 @@ class AppointmentConfirmationService:
                         phone, current_state.stage,
                     )
                     stats["skipped_busy"] += 1
+                    self._record_skip(skipped_details, appointment, "conversa em andamento (estado nao-ocioso)")
                     continue
 
                 patient = PatientService.find_by_phone(phone) or {}
@@ -363,6 +449,9 @@ class AppointmentConfirmationService:
                         appointment_start=start_time,
                     )
                     stats["failed"] += 1
+                    self._record_skip(
+                        skipped_details, appointment, "falha no envio (sera re-tentado no proximo ciclo)", "failed"
+                    )
                     continue
 
                 ConversationService.add_message(phone, "assistant", message)
@@ -394,6 +483,15 @@ class AppointmentConfirmationService:
                 except Exception:
                     pass
                 stats["failed"] += 1
+                self._record_skip(skipped_details, appointment, "excecao no processamento", "failed")
+
+        # 019: cobertura observável — persiste os não contatados e envia o relatório diário à
+        # clínica. O lembrete pode falhar para um caso, mas nunca em silêncio.
+        stats["skipped_details"] = skipped_details
+        ReminderCoverageStore.record_misses(
+            run_date=target_date.isoformat(), skipped_details=skipped_details
+        )
+        await self._send_coverage_report(target_date, skipped_details, stats["sent"])
 
         return stats
 

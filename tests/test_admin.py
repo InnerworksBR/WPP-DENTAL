@@ -229,6 +229,33 @@ def test_errors_return_failed_messages_and_confirmations(admin_client: TestClien
     assert data["appointment_confirmations"][0]["event_id"] == "evt-1"
 
 
+def test_coverage_endpoint_returns_misses(admin_client: TestClient):
+    """019/CA-004: /admin/api/coverage expõe os pacientes não contatados (pulados/falhas)."""
+    db = get_db()
+    db.execute(
+        "INSERT INTO appointment_confirmations "
+        "(event_id, phone, patient_name, appointment_start, status) VALUES (?, ?, ?, ?, ?)",
+        ("evt-ok", "5511999999999", "Maria", "2026-05-20T09:00:00-03:00", "sent"),
+    )
+    db.execute(
+        "INSERT INTO reminder_coverage (run_date, event_id, patient_name, phone, outcome, reason) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("2026-05-20", "evt-nofone", "Joao", "", "skipped", "sem telefone"),
+    )
+    db.commit()
+
+    response = admin_client.get("/admin/api/coverage")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["run_date"] == "2026-05-20"
+    assert data["sent"] == 1
+    assert data["skipped"] == 1
+    assert data["failed"] == 0
+    assert data["misses"][0]["patient_name"] == "Joao"
+    assert "sem telefone" in data["misses"][0]["reason"]
+
+
 def test_appointments_ignore_day_blocks(admin_client: TestClient, monkeypatch: pytest.MonkeyPatch):
     class FakeCalendarService(CalendarService):
         def __init__(self) -> None:

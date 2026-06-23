@@ -1,7 +1,7 @@
 # Lembretes Confiáveis e Cobertura Total
 
 > **ID:** 019
-> **Status:** 🟡 Planejada
+> **Status:** 🟢 Concluída
 > **Prioridade:** 🔴 Crítica
 > **Criada em:** 2026-06-23
 > **Última atualização:** 2026-06-23
@@ -143,8 +143,11 @@ Cobertura por consulta/dia. Preferir **reuso** da `appointment_confirmations`
   é **registrado** com `{nome, motivo, event_id}` — nunca silencioso.
 - **RF-002:** Ao fim do cron, um **relatório diário** é enviado à clínica com
   `enviados / pulados / falhas` e o nome + motivo de cada pulado e falha.
-- **RF-003:** Falhas de envio entram em uma **fila de re-tentativa** (reusando `failed_alert_store` /
-  `outbound_message_store`), com limite de tentativas e backoff.
+- **RF-003:** Falhas de envio são **re-tentadas entre execuções** pelo mecanismo já existente
+  (`_try_claim_reminder_send` re-reivindica reminders com status `failed`/`processing` no ciclo
+  seguinte) **e** surgem no relatório diário com motivo, para ação manual imediata da clínica. Decisão
+  (execução): não foi criada uma fila in-run dedicada (a resiliência de envio já vem da impl 009 +
+  re-claim cross-run); ver §9.
 - **RF-004:** Pulados e pendentes ficam **visíveis no `/admin`** (endpoint/seção de cobertura).
 - **RF-005:** Resolução de telefone por nome mais robusta; consulta "sem telefone" vira **pendência
   visível**, não só `warning` de log.
@@ -228,6 +231,20 @@ Cobertura por consulta/dia. Preferir **reuso** da `appointment_confirmations`
   mas **nunca em silêncio** — a clínica aciona manualmente".
 - Decisão reuso-de-tabela vs. tabela nova (`reminder_coverage`) será registrada na execução conforme
   a constraint `UNIQUE` da `appointment_confirmations`.
+
+**Decisões de execução (2026-06-23):**
+- **Tabela nova `reminder_coverage`** (não reuso de `appointment_confirmations`): a constraint
+  `UNIQUE(event_id, reminder_type, appointment_start)` e os status existentes (`sent`/`failed`/
+  `processing`) tornariam o reuso ambíguo. `reminder_coverage` registra só os **não contatados**
+  (`outcome` ∈ `skipped`/`failed`) com motivo; idempotente por `run_date` (re-grava ao reexecutar).
+  Store isolado: `ReminderCoverageStore`.
+- **Relatório guardado por `DOCTOR_PHONE`:** só envia se configurado (em produção, está no `.env`).
+  Em testes sem essa config, o cron segue sem relatório — zero impacto nos testes legados.
+- **Re-tentativa (RF-003):** atendida por `_try_claim_reminder_send` (re-claim cross-run de `failed`)
+  + resiliência de envio da impl 009 + surfacing no relatório. Fila in-run dedicada considerada
+  over-engineering para um cron diário; não construída.
+- **`/admin/api/coverage`:** endpoint novo (aditivo) lê `reminder_coverage` + conta `sent` de
+  `appointment_confirmations` do dia. Sem `run_date`, usa a execução mais recente.
 
 ---
 
