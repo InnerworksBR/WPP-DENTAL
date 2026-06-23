@@ -246,6 +246,16 @@ class TestCreateAppointmentIdempotency:
     def _patch_calendar(self, monkeypatch, find_fn, create_fn=None, slot_conflicts_fn=None):
         """Helper: monkeypatcha CalendarService para testes de idempotencia."""
         from src.infrastructure.integrations import calendar_service
+
+        # Congela o "agora" para tornar os testes deterministicos: os slots usam 23/06/2026 e a
+        # validacao "ja esta no passado" depende do relogio real. Sem freeze, falhavam a partir
+        # de 23/06/2026 (data fixa virou passado). Now fixo em 22/06/2026 mantem o slot no futuro.
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 6, 22, 8, 0, tzinfo=tz)
+
+        monkeypatch.setattr(calendar_service, "datetime", _FrozenDatetime)
         monkeypatch.setattr(calendar_service.CalendarService, "find_appointments_by_phone", find_fn)
         if create_fn:
             monkeypatch.setattr(calendar_service.CalendarService, "create_appointment", create_fn)

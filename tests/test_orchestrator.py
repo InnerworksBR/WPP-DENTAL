@@ -310,3 +310,102 @@ def test_reactive_reoffer_error_defers():
         "quero outro dia", ConversationState(), "p", []
     )
     assert res.handled is False
+
+
+# ── Oferta inicial determinística (try_initial_offer) — impl 018 / Fase A ────────
+
+
+def test_initial_offer_generates_structured_offer():
+    """RF-001/CA-002: a oferta inicial nasce da agenda como dado estruturado."""
+    cal = _FakeCalendar(slots={"date_str": "25/06/2026", "times": ["08:00", "09:30"]})
+    res = _orch(calendar=cal).try_initial_offer(
+        "quero agendar uma consulta", ConversationState(), "5511999999999", []
+    )
+    assert res.handled is True
+    assert res.status == "initial_offer"
+    assert res.next_state.offered_date == "25/06/2026"
+    assert res.next_state.offered_times == ["08:00", "09:30"]
+    assert res.extra["offered_date"] == "25/06/2026"
+
+
+def test_initial_offer_message_matches_state_exactly():
+    """Regressão (b) horário errado: a mensagem ofertada == os slots salvos no estado.
+
+    A oferta deixa de ser prosa relida por regex; o que o paciente vê é exatamente o que a FSM
+    gravou (sem divergência possível)."""
+    times = ["08:00", "09:30"]
+    cal = _FakeCalendar(slots={"date_str": "25/06/2026", "times": times})
+    res = _orch(calendar=cal).try_initial_offer("quero marcar", ConversationState(), "p", [])
+    for t in times:
+        assert t in res.reply_text
+    assert res.next_state.offered_times == times
+    # Nenhum horário fora dos slots da agenda aparece na mensagem.
+    import re as _re
+    shown = _re.findall(r"\b\d{2}:\d{2}\b", res.reply_text)
+    assert set(shown) == set(times)
+
+
+def test_initial_offer_no_slots_is_honest():
+    """RF-005: sem disponibilidade, nada de horário fabricado; oferta vazia e resposta honesta."""
+    res = _orch(calendar=_FakeCalendar(slots=None)).try_initial_offer(
+        "quero agendar", ConversationState(), "p", []
+    )
+    assert res.handled is True
+    assert res.status == "initial_offer_none"
+    assert res.next_state.offered_times == []
+    import re as _re
+    assert _re.search(r"\b\d{2}:\d{2}\b", res.reply_text) is None
+
+
+def test_initial_offer_greeting_defers_to_llm():
+    """RF-006/CA-006: saudação não é sequestrada — vai para o motor atual (LLM)."""
+    cal = _FakeCalendar(slots={"date_str": "25/06/2026", "times": ["08:00"]})
+    res = _orch(calendar=cal).try_initial_offer("oi, bom dia", ConversationState(), "p", [])
+    assert res.handled is False
+
+
+def test_initial_offer_defers_when_offer_already_active():
+    """Regressão (a) repetição: havendo oferta ativa, a oferta inicial não dispara de novo."""
+    cal = _FakeCalendar(slots={"date_str": "25/06/2026", "times": ["08:00"]})
+    res = _orch(calendar=cal).try_initial_offer("quero agendar", _offer_state(), "p", [])
+    assert res.handled is False
+
+
+def test_initial_offer_defers_with_recent_offer_in_history():
+    """Regressão (a): se já há oferta no histórico, é caso de seleção/re-oferta, não nova oferta."""
+    history = [
+        {"role": "assistant", "content": "Tenho estes horarios disponiveis em 24/06/2026:\n1. 08:00\n2. 09:00\n\nQual voce prefere?"}
+    ]
+    cal = _FakeCalendar(slots={"date_str": "25/06/2026", "times": ["10:00"]})
+    res = _orch(calendar=cal).try_initial_offer("quero agendar", ConversationState(), "p", history)
+    assert res.handled is False
+
+
+def test_initial_offer_pending_confirmation_defers():
+    cal = _FakeCalendar(slots={"date_str": "25/06/2026", "times": ["08:00"]})
+    state = ConversationState(pending_slot_date="25/06/2026", pending_slot_time="08:00")
+    res = _orch(calendar=cal).try_initial_offer("quero agendar", state, "p", [])
+    assert res.handled is False
+
+
+def test_initial_offer_not_idle_defers():
+    cal = _FakeCalendar(slots={"date_str": "25/06/2026", "times": ["08:00"]})
+    state = ConversationState(stage=FlowState.AWAITING_PLAN.value)
+    res = _orch(calendar=cal).try_initial_offer("quero agendar", state, "p", [])
+    assert res.handled is False
+
+
+def test_initial_offer_reschedule_defers():
+    """Remarcar é da troca atômica (handler provado), não da oferta inicial."""
+    cal = _FakeCalendar(slots={"date_str": "25/06/2026", "times": ["08:00"]})
+    res = _orch(calendar=cal).try_initial_offer("quero remarcar minha consulta", ConversationState(), "p", [])
+    assert res.handled is False
+
+
+def test_initial_offer_calendar_error_defers_to_llm():
+    class _BoomCal:
+        def find_next_available_slots(self, **kwargs):
+            raise RuntimeError("boom")
+
+    res = _orch(calendar=_BoomCal()).try_initial_offer("quero agendar", ConversationState(), "p", [])
+    assert res.handled is False

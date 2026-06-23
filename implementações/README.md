@@ -3,7 +3,7 @@
 > **Índice do projeto (Spec-Driven Development).** Este arquivo é a fonte de verdade do
 > status e da ordem das implementações. Atualize-o sempre que uma implementação mudar de status.
 >
-> **Criado em:** 2026-06-15 · **Última atualização:** 2026-06-22 (Fase 2 — refatoração 014–017 planejada)
+> **Criado em:** 2026-06-15 · **Última atualização:** 2026-06-23 (Fase 3 — correções 018–019 planejadas)
 
 ---
 
@@ -73,7 +73,32 @@ usando os 488 testes como catraca anti-regressão. Trabalho na branch `refactor/
 > **Resultado da Fase 2:** o orquestrador determinístico (`src/application/flow/`) é a fonte única
 > das decisões estruturadas de agenda, religado no `app.py` via deferimento incremental, com os
 > handlers provados de criação/remarcação intactos. Transporte isolado (014), NLU consolidada (015).
-> Suíte **542/542** verde na branch `refactor/nucleo-conversa`. Nada foi para a `main`.
+> Suíte **542/542** verde na branch `refactor/nucleo-conversa`. Mergeada para `main` (commit `383f7c8`).
+
+---
+
+## 2-C. Fase 3 — Correção Definitiva dos Sintomas Remanescentes (018–019)
+
+Decompõe a parte acionável de `docs/ANALISE_SOLUCAO_DEFINITIVA.md`. A análise mostrou que os três
+sintomas relatados pelo dono não são bugs independentes, mas o efeito da **fronteira que sobrou** do
+cérebro duplo (a oferta inicial ainda nascia em prosa do LLM, relida por regex) somado ao **descarte
+silencioso** no cron de lembretes. A Fase 3 fecha essas duas frentes.
+
+**Decisões do dono (2026-06-23):** **manter OpenAI** (sem migrar para Ollama/Qwen — Fase C do
+documento descartada) e **manter Evolution API** (sem migrar para a Cloud API oficial — Fase D
+descartada). O escopo fica nas duas correções determinísticas; nenhuma troca de transporte/LLM.
+
+| # | Implementação | Status | Prioridade | Escopo (resumo) | Sintoma | ~Tarefas |
+|---|---|---|---|---|---|---|
+| 018 | Fronteira da Oferta Determinística | 🟢 Concluída (escopo seguro) | 🔴 Crítica | FSM gera a **oferta inicial** como dado estruturado (`try_initial_offer`), caminho primário; mensagem == estado; seleção casa contra `offered_times`. Regex/tools do LLM mantidos como fallback (remoção total = RF-003-B). Suíte **552** verde | (a) repete + (b) horário errado | 13 (10 feitas + 3 deferidas) |
+| 019 | Lembretes Confiáveis e Cobertura Total | 🟡 Planejada | 🔴 Crítica | Acaba o descarte silencioso do cron: relatório diário à clínica (`enviados/pulados/falhas` + nome/motivo), fila de re-tentativa, pendências no `/admin`, teste por caminho de descarte | (c) não chega a todos | 13 |
+
+**Sequência:** 018 → 019 (independentes entre si; 018 está pronta para começar — não depende de
+nenhuma decisão em aberto). **Fases C/D do documento (Ollama, WhatsApp oficial) NÃO entram** por
+decisão do dono. A **Fase E** (merge para `main` + deploy no EasyPanel) ocorre após 018 e 019 verdes.
+
+> **Mapa sintoma → implementação (Fase 3):** (a) "repete" → **018** · (b) "horário errado" → **018** ·
+> (c) "lembrete não chega a todos" → **019**.
 
 ---
 
@@ -135,6 +160,8 @@ escopo, mensageria, configuração e segurança.
 | 015 | 014 |
 | 016 | 014, 015 |
 | 017 | 016 |
+| 018 | 016 (reusa 007, 008, 009, 015; preserva 000/005/006) |
+| 019 | 010, 013 (reusa 009, 012) |
 
 ---
 

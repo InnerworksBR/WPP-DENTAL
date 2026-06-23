@@ -170,6 +170,9 @@ _LEGACY_ORCH_STATUS = {
     "pending_slot_plan_referral": "pending_slot_plan_resolved",
     "pending_slot_plan_unknown": "pending_slot_plan_resolved",
     "pending_slot_plan_awaiting_name": "pending_slot_plan_resolved",
+    # 018: a oferta inicial saía do LLM com status "processed"; preserva o contrato HTTP.
+    "initial_offer": "processed",
+    "initial_offer_none": "processed",
 }
 
 
@@ -452,6 +455,24 @@ async def receive_message(request: Request):
         )
         if cancellation_response is not None:
             return cancellation_response
+
+        # 018 (Fase A): oferta INICIAL determinística. A FSM gera a oferta a partir da agenda como
+        # dado estruturado (não prosa do LLM relida por regex), eliminando repetição/horário errado
+        # no caminho dominante. Defere para o LLM quando não é pedido de agendamento acionável.
+        initial_offer_result = orchestrator.try_initial_offer(
+            text,
+            ConversationStateService.get(phone),
+            phone,
+            ConversationService.get_history(phone, limit=8),
+        )
+        if initial_offer_result.handled:
+            return await _respond_orchestrator(
+                initial_offer_result,
+                phone=phone,
+                text=text,
+                contact_name=contact_name,
+                message_id=message_id,
+            )
 
     history_text = ConversationService.format_history_for_prompt(phone)
     is_first_message = not ConversationService.has_recent_history(phone)

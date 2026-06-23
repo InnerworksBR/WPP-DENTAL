@@ -1257,14 +1257,18 @@ class TestMainWebhook:
             def now(cls, tz=None):
                 return datetime(2026, 5, 20, 10, 0, tzinfo=tz)
 
-        captured = {}
+        calls = {"process": 0}
 
         def fake_process_message(**kwargs):
-            captured["state"] = ConversationStateService.get(kwargs["patient_phone"])
+            calls["process"] += 1
             return "Vou procurar a proxima segunda disponivel."
 
         async def fake_send_message(self, phone, message):
             return True
+
+        def fake_find_next(self, **kwargs):
+            # 018: a FSM gera a oferta inicial deterministica a partir da agenda.
+            return {"date_str": "25/05/2026", "times": ["09:00", "10:00"]}
 
         app_module = importlib.import_module("src.interfaces.http.app")
         monkeypatch.setattr(main.dental_crew, "process_message", fake_process_message)
@@ -1272,6 +1276,10 @@ class TestMainWebhook:
         monkeypatch.setattr(
             "src.infrastructure.integrations.whatsapp_service.WhatsAppService.send_message",
             fake_send_message,
+        )
+        monkeypatch.setattr(
+            "src.infrastructure.integrations.calendar_service.CalendarService.find_next_available_slots",
+            fake_find_next,
         )
 
         with TestClient(main.app) as client:
@@ -1293,8 +1301,13 @@ class TestMainWebhook:
             )
 
         assert response.status_code == 200
-        assert captured["state"].requested_weekday == "0"
-        assert "01/06/2026" in captured["state"].excluded_dates
+        # 018 (Fase A): a oferta inicial passou a ser deterministica (FSM), sem cair no LLM.
+        assert calls["process"] == 0
+        # As restricoes (segunda-feira; exceto dia 1) sao extraidas e persistidas pelo
+        # _capture_schedule_constraints ANTES da oferta e preservadas no estado final.
+        state = ConversationStateService.get("5511999999999")
+        assert state.requested_weekday == "0"
+        assert "01/06/2026" in state.excluded_dates
 
     def test_new_message_after_terminal_action_starts_fresh_context(self, monkeypatch):
         import src.main as main

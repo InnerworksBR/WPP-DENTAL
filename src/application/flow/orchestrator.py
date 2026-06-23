@@ -244,6 +244,92 @@ class ConversationOrchestrator:
             extra={"offered_date": result["date_str"]},
         )
 
+    def try_initial_offer(
+        self, message: str, state: ConversationState, phone: str, history: list[dict]
+    ) -> OrchestratorResult:
+        """Oferta INICIAL determinística (impl 018, Fase A).
+
+        Quando o paciente pede para agendar e ainda NÃO há oferta em curso, a FSM gera a oferta a
+        partir da agenda (`find_next_available_slots`), grava os slots como DADO ESTRUTURADO
+        (`offered_date`/`offered_times`) e devolve a mensagem por template — idêntica ao estado
+        salvo. Assim a oferta deixa de nascer em prosa do LLM relida por regex, o que elimina a
+        repetição (a) e os horários errados (b) no caminho dominante.
+
+        Defere (`handled=False`) quando não é um pedido de agendamento acionável (saudação, dúvida
+        aberta, remarcar/cancelar), quando já existe oferta/confirmação em curso, ou em erro de
+        agenda — preservando o LLM como fallback para conversa fuzzy (lição da 017)."""
+        # Só atua a partir de estado ocioso, sem oferta nem confirmação em curso.
+        if FlowState.from_stage(state.stage) != FlowState.IDLE:
+            return _deferred()
+        if state.offered_date and state.offered_times:
+            return _deferred()  # já há oferta ativa: seleção/re-oferta cuidam
+        if state.pending_slot_date and state.pending_slot_time:
+            return _deferred()  # confirmação pendente: outro caminho
+
+        # Não re-ofertar sobre uma oferta/confirmação recente do histórico (isso é seleção/re-oferta).
+        if (
+            AppointmentOfferService.extract_latest_offer(history)
+            or AppointmentOfferService.extract_latest_confirmation_request(history)
+        ):
+            return _deferred()
+
+        # NLU é o papel permitido do LLM: só assume a oferta para intenção de AGENDAR (determinística
+        # quando há token de agenda; remarcar/cancelar/saudação/fora de escopo deferem ao motor atual).
+        context = self.build_context(state)
+        nlu = self._classifier.classify(message, context)
+        if nlu.intent != Intent.AGENDAR:
+            return _deferred(nlu)
+
+        start_date = None
+        if state.requested_date:
+            try:
+                start_date = datetime.strptime(state.requested_date, "%d/%m/%Y").replace(tzinfo=SAO_PAULO_TZ)
+            except ValueError:
+                start_date = None
+        if start_date is None:
+            start_date = datetime.now(SAO_PAULO_TZ)
+
+        try:
+            result = self._calendar_service().find_next_available_slots(
+                start_date=start_date,
+                period=state.requested_period or None,
+                earliest_time=state.earliest_time or "",
+                exclude_dates=state.excluded_dates,
+                exclude_slots=state.rejected_slots,
+                limit=self._config.get_suggestions_count(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[orchestrator] oferta inicial: falha na busca: %s", exc, exc_info=True)
+            return _deferred(nlu)  # erro de agenda: deixa o motor atual seguir
+
+        if not result:
+            return OrchestratorResult(
+                handled=True,
+                reply_text=(
+                    "Nao encontrei horario livre com essa preferencia nos proximos dias. 😕\n"
+                    "Quer que eu veja outro dia ou periodo?"
+                ),
+                next_state=state,
+                status="initial_offer_none",
+                nlu=nlu,
+            )
+
+        next_state = _clone(state)
+        next_state.offered_date = result["date_str"]
+        next_state.offered_times = list(result["times"])
+        options = "\n".join(f"{index}. {t}" for index, t in enumerate(result["times"], 1))
+        return OrchestratorResult(
+            handled=True,
+            reply_text=(
+                f"Tenho estes horarios disponiveis em {result['date_str']}:\n{options}\n\n"
+                "Qual voce prefere?"
+            ),
+            next_state=next_state,
+            status="initial_offer",
+            nlu=nlu,
+            extra={"offered_date": result["date_str"]},
+        )
+
     def _resolve_valid_plan_name(self, state: ConversationState, phone: str) -> str:
         """Espelha _resolve_valid_plan_name do app.py: valida plano do estado/cadastro contra o
         config e fixa o nome canônico no estado. Retorna "" se não houver plano direto válido."""
